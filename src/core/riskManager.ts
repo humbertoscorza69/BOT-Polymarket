@@ -1,0 +1,134 @@
+import EventEmitter from 'eventemitter3';
+import { BotConfig } from '../config';
+import {
+  InventoryState,
+  RiskEvent,
+  RiskState,
+} from '../types';
+import { getLogger } from '../utils/logger';
+
+const log = getLogger('risk');
+
+export interface RiskInputs {
+  sessionPnl: number;
+  peakPnl: number;
+  consecutiveLosses: number;
+  adverseSelectionEma: number;
+  apiErrors: number;
+  feedStale: boolean;
+  orderRejections: number;
+  reconcileDrift: boolean;
+  inventory: InventoryState;
+}
+
+export class RiskManager extends EventEmitter {
+  private state: RiskState = 'NORMAL';
+  private events: RiskEvent[] = [];
+  private lastTransition = Date.now();
+
+  constructor(private readonly cfg: BotConfig) {
+    super();
+  }
+
+  getState(): RiskState {
+    return this.state;
+  }
+
+  getEvents(): RiskEvent[] {
+    return this.events.slice(-50);
+  }
+
+  evaluate(inp: RiskInputs): RiskState {
+    const drawdown = Math.max(0, inp.peakPnl - inp.sessionPnl);
+    const prev = this.state;
+
+    let next: RiskState = 'NORMAL';
+    let reason = '';
+    let code = 'OK';
+
+    if (inp.reconcileDrift) {
+      next = 'HALTED';
+      reason = 'reconciliation drift detected';
+      code = 'RECONCILE_DRIFT';
+    } else if (inp.apiErrors > this.cfg.riskApiErrorCap) {
+      next = 'HALTED';
+      reason = 'API error cap exceeded';
+      code = 'API_ERRORS';
+    } else if (inp.sessionPnl <= -this.cfg.riskSessionLossCapUsdc) {
+      next = 'EMERGENCY';
+      reason = `session loss cap ${inp.sessionPnl.toFixed(2)}`;
+      code = 'SESSION_LOSS';
+    } else if (drawdown >= this.cfg.riskDrawdownCapUsdc) {
+      next = 'HALTED';
+      reason = `drawdown ${drawdown.toFixed(2)}`;
+      code = 'DRAWDOWN';
+    } else if (inp.consecutiveLosses >= this.cfg.riskConsecutiveLossCap) {
+      next = 'THROTTLED';
+      reason = `consecutive losses ${inp.consecutiveLosses}`;
+      code = 'CONSEC_LOSS';
+    } else if (inp.adverseSelectionEma >= this.cfg.riskToxicFlowEmaCap) {
+      next = 'HALTED';
+      reason = `toxic flow ema ${inp.adverseSelectionEma.toFixed(2)}`;
+      code = 'TOXIC_FLOW';
+    } else if (inp.adverseSelectionEma >= this.cfg.riskToxicFlowEmaCap * 0.75) {
+      next = 'THROTTLED';
+      reason = `elevated toxicity ${inp.adverseSelectionEma.toFixed(2)}`;
+      code = 'ELEVATED_TOX';
+    } else if (inp.orderRejections > 10) {
+      next = 'THROTTLED';
+      reason = `order rejections ${inp.orderRejections}`;
+      code = 'REJECTIONS';
+    } else if (Math.abs(inp.inventory.normalizedSkew) > 0.95) {
+      next = 'THROTTLED';
+      reason = `inventory extreme skew ${inp.inventory.normalizedSkew.toFixed(2)}`;
+      code = 'INV_EXTREME';
+    } else if (inp.feedStale) {
+      next = 'THROTTLED';
+      reason = 'feed stale';
+      code = 'FEED_STALE';
+    }
+
+    // don't demote from EMERGENCY automatically
+    if (prev === 'EMERGENCY') next = 'EMERGENCY';
+    // don't oscillate too fast: if we went HALTED, require at least 5s
+    if (prev === 'HALTED' && Date.now() - this.lastTransition < 5000 && next === 'NORMAL') {
+      next = 'THROTTLED';
+    }
+
+    if (next !== prev) {
+      const severity: RiskEvent['severity'] =
+        next === 'EMERGENCY' ? 'error' : next === 'HALTED' ? 'error' : next === 'THROTTLED' ? 'warn' : 'info';
+      const ev: RiskEvent = {
+        ts: Date.now(),
+        state: next,
+        reason,
+        code,
+        severity,
+        pnl: inp.sessionPnl,
+        drawdown,
+      };
+      this.events.push(ev);
+      if (this.events.length > 200) this.events.shift();
+      this.state = next;
+      this.lastTransition = Date.now();
+      log.warn('risk state change', { from: prev, to: next, reason, code });
+      this.emit('transition', ev);
+    }
+    return this.state;
+  }
+
+  forceState(state: RiskState, reason: string): void {
+    if (this.state === state) return;
+    const ev: RiskEvent = {
+      ts: Date.now(),
+      state,
+      reason,
+      code: 'FORCED',
+      severity: 'warn',
+    };
+    this.state = state;
+    this.lastTransition = Date.now();
+    this.events.push(ev);
+    this.emit('transition', ev);
+  }
+}

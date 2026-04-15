@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Polymarket MM Bot — Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">POLYMARKET MM BOT</div>
+      <div class="status" id="headerStatus">connecting…</div>
+    </header>
+    <main>
+      <section class="grid">
+        <div class="card" id="sessionCard">
+          <h3>Session</h3>
+          <div class="kv" id="sessionKv"></div>
+        </div>
+        <div class="card" id="marketCard">
+          <h3>Market</h3>
+          <div class="kv" id="marketKv"></div>
+        </div>
+        <div class="card" id="riskCard">
+          <h3>Risk / Health</h3>
+          <div class="kv" id="riskKv"></div>
+        </div>
+        <div class="card" id="regimeCard">
+          <h3>Regime</h3>
+          <div class="kv" id="regimeKv"></div>
+        </div>
+        <div class="card wide" id="pnlCard">
+          <h3>PnL</h3>
+          <div class="kv" id="pnlKv"></div>
+          <canvas id="equityChart" height="100"></canvas>
+        </div>
+        <div class="card wide" id="signalsCard">
+          <h3>Signals</h3>
+          <div class="kv" id="signalsKv"></div>
+        </div>
+        <div class="card" id="feedCard">
+          <h3>Feeds</h3>
+          <div class="kv" id="feedKv"></div>
+        </div>
+        <div class="card" id="invCard">
+          <h3>Inventory</h3>
+          <div class="kv" id="invKv"></div>
+        </div>
+        <div class="card" id="liveCard">
+          <h3>Live Execution</h3>
+          <div class="kv" id="liveKv"></div>
+        </div>
+        <div class="card" id="quoteCard">
+          <h3>Current Quote</h3>
+          <div class="kv" id="quoteKv"></div>
+        </div>
+        <div class="card wide" id="ordersCard">
+          <h3>Active Orders</h3>
+          <table id="ordersTable">
+            <thead>
+              <tr><th>Token</th><th>Side</th><th>Price</th><th>Size</th><th>Filled</th><th>Age</th><th>Status</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card wide" id="fillsCard">
+          <h3>Recent Fills</h3>
+          <table id="fillsTable">
+            <thead>
+              <tr><th>Time</th><th>Token</th><th>Side</th><th>Price</th><th>Size</th><th>Regime</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card wide" id="discoveryCard">
+          <h3>Discovery / Rotation</h3>
+          <div class="kv" id="discoveryKv"></div>
+          <table id="discoveryTable">
+            <thead>
+              <tr><th>Slug</th><th>Score</th><th>Reasons</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card wide" id="advCard">
+          <h3>Adverse Selection / Autohealing</h3>
+          <div class="kv" id="advKv"></div>
+          <ul id="autohealList"></ul>
+        </div>
+        <div class="card wide" id="latencyCard">
+          <h3>Latency Arbitrage Defense</h3>
+          <div class="kv" id="latencyKv"></div>
+          <ul id="latencyList"></ul>
+        </div>
+      </section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

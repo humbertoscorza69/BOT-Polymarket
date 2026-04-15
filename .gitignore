@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+data/logs/*
+data/sessions/*
+data/snapshots/*
+data/fills.jsonl
+data/params_state.json
+!data/.gitkeep
+coverage/
+.vscode/
+.idea/
+*.tsbuildinfo
