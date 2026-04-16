@@ -181,16 +181,26 @@ export class DiscoveryEngine extends EventEmitter {
     );
 
     const markets: PolymarketMarket[] = [];
+    let fetchFailures = 0;
     for (const r of results) {
-      if (r.status === 'fulfilled' && r.value) {
-        markets.push(r.value.market);
-      }
+      if (r.status === 'rejected') fetchFailures += 1;
+      else if (r.value) markets.push(r.value.market);
     }
 
-    log.debug('fetchAllWindows', {
+    log.info('fetchAllWindows', {
       slugCount: slugs.length,
-      found: markets.length,
+      fetched: markets.length,
+      fetchFailures,
+      missing: slugs.length - markets.length - fetchFailures,
     });
+
+    // If every slug came back empty it usually means the Gamma API is unreachable or
+    // the slug pattern has drifted upstream. Flag it clearly.
+    if (markets.length === 0 && slugs.length > 0) {
+      log.warn('zero markets fetched for all slugs; check network and slug pattern', {
+        sampleSlug: slugs[0]?.slug,
+      });
+    }
 
     return markets;
   }
@@ -333,53 +343,93 @@ export class DiscoveryEngine extends EventEmitter {
    * 2. Higher liquidity
    * 3. More time remaining in the window
    * 4. Outcome prices closer to 0.50 (most balanced)
+   *
+   * TTR filter is interval-aware: rolling 5m / 15m windows must have at least
+   * `prewarmSecs` of life remaining, not the env's generic hours-minimum (which
+   * is reserved for long-dated, non-rolling markets like `1h` / `daily`).
    */
   private scoreAll(markets: PolymarketMarket[]): DiscoveryCandidate[] {
     const candidates: DiscoveryCandidate[] = [];
     const now = nowSec();
 
+    // Reject-count diagnostics so "no candidates found" has a breakdown
+    const rejects = {
+      closed: 0,
+      notAccepting: 0,
+      expired: 0,
+      tooShortTtl: 0,
+      tooLongTtr: 0,
+      badSlug: 0,
+    };
+
     for (const m of markets) {
-      if (m.closed || !m.active) continue;
+      if (m.closed || !m.active) {
+        rejects.closed += 1;
+        continue;
+      }
 
       // Check if accepting orders
       const raw = m.raw as GammaMarket | undefined;
-      if (raw && raw.acceptingOrders === false) continue;
+      if (raw && raw.acceptingOrders === false) {
+        rejects.notAccepting += 1;
+        continue;
+      }
 
       const ttl = m.endDateTs - now;
-      if (ttl <= 0) continue;
-
-      if (m.volumeNum !== undefined && m.volumeNum < this.cfg.discoveryMinVolumeUsdc) continue;
-
-      const ttrHours = ttl / 3600;
-      if (ttrHours < this.cfg.discoveryMinTtrHours) continue;
-      if (ttrHours > this.cfg.discoveryMaxTtrDays * 24) continue;
+      if (ttl <= 0) {
+        rejects.expired += 1;
+        continue;
+      }
 
       const { asset, interval } = parseSlugMeta(m.slug);
-      if (!asset || !interval) continue;
+      if (!asset || !interval) {
+        rejects.badSlug += 1;
+        continue;
+      }
+
+      // Interval-aware minimum TTL: rolling windows (5m/15m) need to still have
+      // enough life left to finish a prewarm cycle; long-dated markets fall back
+      // to the hours-based env minimum.
+      const intervalSecs = INTERVAL_SECS[interval] ?? 300;
+      const rolling = intervalSecs <= 3600; // 5m, 15m, 1h are "rolling"
+      const minTtlSecs = rolling
+        ? Math.max(10, this.opts.prewarmSecs)
+        : this.cfg.discoveryMinTtrHours * 3600;
+      if (ttl < minTtlSecs) {
+        rejects.tooShortTtl += 1;
+        continue;
+      }
+
+      // Upper bound (applies equally): 30 days default
+      const maxTtlSecs = this.cfg.discoveryMaxTtrDays * 86400;
+      if (ttl > maxTtlSecs) {
+        rejects.tooLongTtr += 1;
+        continue;
+      }
 
       const components: Record<string, number> = {};
 
-      // Liquidity score (log-normalized)
+      // Liquidity score (log-normalized). 0 liq => 0, $10k => ~0.8.
       const liqRaw = m.liquidityNum ?? 0;
       components.liquidity = Math.min(1, Math.log10(1 + liqRaw) / 5);
 
-      // TTL score: prefer markets with more time remaining
-      const intervalSecs = INTERVAL_SECS[interval] ?? 300;
-      components.ttl = Math.min(1, ttl / intervalSecs);
+      // Volume score — softly penalizes low-volume rolling markets without
+      // hard-rejecting them. Full weight above DISCOVERY_MIN_VOLUME_USDC.
+      const volRaw = m.volumeNum ?? 0;
+      const volumeScore = Math.min(1, Math.log10(1 + volRaw) / 6);
+      const volumeFloor = this.cfg.discoveryMinVolumeUsdc;
+      const volumePenalty = volRaw < volumeFloor ? Math.max(0.2, volRaw / Math.max(1, volumeFloor)) : 1;
+      components.volume = volumeScore * volumePenalty;
+
+      // TTL score: prefer markets with more time remaining, scaled by config weight.
+      components.ttl = Math.min(1, ttl / intervalSecs) * this.cfg.quoteTtrWeight;
 
       // Price balance: prefer prices closer to 0.50
       const yesPrice = m.outcomePriceYes ?? 0.5;
       components.priceBalance = 1 - Math.abs(yesPrice - 0.5) * 2; // 1.0 at 0.50, 0.0 at 0/1
-
       if (components.priceBalance < 1 - this.cfg.discoveryMaxInitialSpreadBps / 500) {
         components.priceBalance *= 0.5;
       }
-
-      const volRaw = m.volumeNum ?? 0;
-      const volumeScore = Math.min(1, Math.log10(1 + volRaw) / 6);
-      components.volume = volumeScore;
-      const ttlScore = Math.min(1, ttl / intervalSecs);
-      components.ttl = ttlScore * this.cfg.quoteTtrWeight;
 
       const score =
         components.liquidity * 1.2 +
@@ -392,10 +442,24 @@ export class DiscoveryEngine extends EventEmitter {
         `interval=${interval}`,
         `ttl=${ttl}s`,
         `liq=${liqRaw.toFixed(0)}`,
+        `vol=${volRaw.toFixed(0)}`,
         `price=${yesPrice.toFixed(3)}`,
       ];
 
       candidates.push({ market: m, score, components, reasons });
+    }
+
+    if (candidates.length === 0 && markets.length > 0) {
+      log.warn('scoreAll rejected all markets', {
+        totalInput: markets.length,
+        rejects,
+      });
+    } else {
+      log.info('scoreAll result', {
+        totalInput: markets.length,
+        accepted: candidates.length,
+        rejects,
+      });
     }
 
     candidates.sort((a, b) => b.score - a.score);
