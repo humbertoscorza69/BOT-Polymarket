@@ -30,7 +30,9 @@ export class CancelCoordinator extends EventEmitter {
     const vel = Math.abs(bin.priceVelocityBps);
     const aggr = Math.abs(bin.aggressorRatio);
 
-    if (vel >= this.opts.velocityBpsTrigger || aggr >= this.opts.aggressorTrigger) {
+    // Require BOTH velocity AND aggressor to exceed thresholds.
+    // High aggressor alone is normal one-sided flow; only dangerous with high velocity.
+    if (vel >= this.opts.velocityBpsTrigger && aggr >= this.opts.aggressorTrigger) {
       this.trigger(`velocity=${vel.toFixed(1)}bps aggr=${aggr.toFixed(2)}`);
     }
   }
