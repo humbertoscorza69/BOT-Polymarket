@@ -74,7 +74,8 @@ export interface KillThresholds {
   takerExecutionRateMax: number;
   staleNoQuoteRateMax: number;
   inventoryMismatchPctMax: number;
-  pnlNetMin: number;
+  /** Dollar-denominated net PnL floor. Kill if net PnL drops below this. */
+  pnlNetMinUsdc: number;
   regimeNegativePnl: boolean;
 }
 
@@ -86,7 +87,7 @@ export const DEFAULT_KILL_THRESHOLDS: KillThresholds = {
   takerExecutionRateMax: 0.05,
   staleNoQuoteRateMax: 0.30,
   inventoryMismatchPctMax: 5,
-  pnlNetMin: 0,
+  pnlNetMinUsdc: -15,
   regimeNegativePnl: true,
 };
 
@@ -97,9 +98,28 @@ export class MetricsCalculator {
   private emergencyModeTriggered = 0;
   private regimeTransitions = 0;
   private lastRegime = '';
+  private completedCycles = 0;
+  private warmupComplete = false;
 
   recordFill(fill: Fill): void {
     this.fills.push(fill);
+  }
+
+  /** Called when a market cycle completes (contract expiry). */
+  recordCycleComplete(): void {
+    this.completedCycles += 1;
+    // Warmup ends after the first full cycle completes (partial boot cycle + first full cycle)
+    if (this.completedCycles >= 2) {
+      this.warmupComplete = true;
+    }
+  }
+
+  isWarmupComplete(): boolean {
+    return this.warmupComplete;
+  }
+
+  getCompletedCycles(): number {
+    return this.completedCycles;
   }
 
   recordRegimeTransition(regime: string): void {
@@ -124,7 +144,8 @@ export class MetricsCalculator {
     pnlGross: number,
     pnlNet: number,
     totalTicks: number,
-    thresholds: KillThresholds = DEFAULT_KILL_THRESHOLDS
+    thresholds: KillThresholds = DEFAULT_KILL_THRESHOLDS,
+    pnlNetUsdc: number = pnlNet
   ): PaperTradingMetrics {
     const spreadMetrics = this.calculateSpread(intendedSpreadBps);
     const asMetrics = this.calculateAdverseSelection();
@@ -142,7 +163,8 @@ export class MetricsCalculator {
       inventoryMetrics,
       pnlMetrics,
       thresholds,
-      totalTicks
+      totalTicks,
+      pnlNetUsdc
     );
 
     return {
@@ -286,29 +308,30 @@ export class MetricsCalculator {
     inventory: InventoryMetrics,
     pnl: PnlMetrics,
     thresholds: KillThresholds,
-    totalTicks: number
+    totalTicks: number,
+    pnlNetUsdc: number
   ): string | null {
-    // Warmup guard: don't enforce fill-dependent thresholds until we have
-    // enough data to make meaningful measurements (minimum 5 fills).
-    const hasFills = this.fills.length >= 5;
+    // Cycle-based warmup: don't enforce fill-dependent thresholds until
+    // at least 2 market cycles have completed (the partial boot cycle + first full cycle).
+    const warmedUp = this.warmupComplete;
 
-    if (hasFills && spread.realizedSpreadBps < thresholds.spreadBpsMin) {
+    if (warmedUp && spread.realizedSpreadBps < thresholds.spreadBpsMin) {
       return `KILL: Realized spread ${spread.realizedSpreadBps} bps < minimum ${thresholds.spreadBpsMin} bps`;
     }
 
-    if (hasFills && as.avgAdverseSelectionBps > thresholds.adverseSelectionBpsMax) {
+    if (warmedUp && as.avgAdverseSelectionBps > thresholds.adverseSelectionBpsMax) {
       return `KILL: Adverse selection ${as.avgAdverseSelectionBps} bps > max ${thresholds.adverseSelectionBpsMax} bps`;
     }
 
-    if (hasFills && fillQuality.fillRate < thresholds.fillRateMin) {
+    if (warmedUp && fillQuality.fillRate < thresholds.fillRateMin) {
       return `KILL: Fill rate ${(fillQuality.fillRate * 100).toFixed(1)}% < minimum ${(thresholds.fillRateMin * 100).toFixed(1)}%`;
     }
 
-    if (hasFills && fillQuality.fillRate > thresholds.fillRateMax) {
+    if (warmedUp && fillQuality.fillRate > thresholds.fillRateMax) {
       return `KILL: Fill rate ${(fillQuality.fillRate * 100).toFixed(1)}% > maximum ${(thresholds.fillRateMax * 100).toFixed(1)}%`;
     }
 
-    if (hasFills && takerExec.takerFillRate > thresholds.takerExecutionRateMax) {
+    if (warmedUp && takerExec.takerFillRate > thresholds.takerExecutionRateMax) {
       return `KILL: Taker execution ${(takerExec.takerFillRate * 100).toFixed(1)}% > max ${(thresholds.takerExecutionRateMax * 100).toFixed(1)}%`;
     }
 
@@ -319,8 +342,9 @@ export class MetricsCalculator {
       return `KILL: Stale price triggers ${(takerExec.stalePriceTriggerRate * 100).toFixed(1)}% > max ${(thresholds.staleNoQuoteRateMax * 100).toFixed(1)}%`;
     }
 
-    if (hasFills && pnl.netRealizedPnlBps < thresholds.pnlNetMin) {
-      return `KILL: Net PnL ${pnl.netRealizedPnlBps} bps < minimum ${thresholds.pnlNetMin} bps`;
+    // Dollar-based PnL kill threshold (always active — this is a hard circuit breaker)
+    if (pnlNetUsdc < thresholds.pnlNetMinUsdc) {
+      return `KILL: Net PnL $${pnlNetUsdc.toFixed(2)} < minimum $${thresholds.pnlNetMinUsdc.toFixed(2)}`;
     }
 
     return null;

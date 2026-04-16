@@ -35,10 +35,7 @@ function parseSymbolMap(raw: string | undefined): SymbolMap {
     BTC: 'BTCUSDT',
     ETH: 'ETHUSDT',
     SOL: 'SOLUSDT',
-    DOGE: 'DOGEUSDT',
     XRP: 'XRPUSDT',
-    BNB: 'BNBUSDT',
-    HYPE: 'HYPEUSDT',
   };
   if (!raw) return def;
   const m: SymbolMap = {};
@@ -155,6 +152,8 @@ export interface EnvConfig {
   freshnessPolyMaxStaleMs: number;
   freshnessBinanceMaxStaleMs: number;
   freshnessMinOrderbookDepth: number;
+
+  killPnlNetMin: number;
 }
 
 export function loadEnv(): EnvConfig {
@@ -173,7 +172,7 @@ export function loadEnv(): EnvConfig {
     maxOrderSizeUsdc: num(e.MAX_ORDER_SIZE_USDC, 50),
     defaultQuoteSizeUsdc: num(e.DEFAULT_QUOTE_SIZE_USDC, 15),
 
-    targetAssets: csv(e.TARGET_ASSETS, ['BTC', 'ETH', 'SOL', 'DOGE', 'XRP', 'BNB', 'HYPE']).map((x) => x.toUpperCase()),
+    targetAssets: csv(e.TARGET_ASSETS, ['BTC', 'ETH', 'SOL', 'XRP']).map((x) => x.toUpperCase()),
     targetIntervals: csv(e.TARGET_INTERVALS, ['5m', '15m']).map((x) => x.toLowerCase()),
     discoveryPollMs: num(e.DISCOVERY_POLL_MS, 30_000),
     discoveryMinLiquidityScore: num(e.DISCOVERY_MIN_LIQUIDITY_SCORE, 0.15),
@@ -269,6 +268,8 @@ export function loadEnv(): EnvConfig {
     freshnessPolyMaxStaleMs: num(e.FRESHNESS_POLY_MAX_STALE_MS, 5000),
     freshnessBinanceMaxStaleMs: num(e.FRESHNESS_BINANCE_MAX_STALE_MS, 15000),
     freshnessMinOrderbookDepth: num(e.FRESHNESS_MIN_ORDERBOOK_DEPTH, 3),
+
+    killPnlNetMin: num(e.KILL_PNL_NET_MIN, -15),
   };
 
   validateSanity(cfg);

@@ -55,9 +55,17 @@ async function main(): Promise<void> {
     dataSource: cfg.dataSource,
     liveApiEnabled: cfg.liveApiEnabled,
     bankroll: cfg.bankrollUsdc,
+    quoteSize: cfg.defaultQuoteSizeUsdc,
+    maxOrderSize: cfg.maxOrderSizeUsdc,
+    maxInventory: cfg.riskMaxInventoryUsdc,
     assets: cfg.targetAssets,
     intervals: cfg.targetIntervals,
     runId: cfg.runId,
+  });
+  log.info('risk limits', {
+    sessionLoss: cfg.riskSessionLossCapUsdc,
+    drawdown: cfg.riskDrawdownCapUsdc,
+    killPnlNetMin: cfg.killPnlNetMin,
   });
   log.info('POL-2 parameters', getPol2Params(cfg));
   if (cfg.mode === 'live') {
@@ -86,7 +94,11 @@ async function main(): Promise<void> {
   // Metrics framework (POL-14/POL-15)
   const metricsCalc = new MetricsCalculator();
   const metricsExporter = new MetricsExporter('./data/metrics');
-  const killMonitor = new KillThresholdMonitor(DEFAULT_KILL_THRESHOLDS);
+  const killThresholds: typeof DEFAULT_KILL_THRESHOLDS = {
+    ...DEFAULT_KILL_THRESHOLDS,
+    pnlNetMinUsdc: cfg.killPnlNetMin,
+  };
+  const killMonitor = new KillThresholdMonitor(killThresholds);
   const metricsHistory: PaperTradingMetrics[] = [];
   const sessionStartTime = cfg.startTs;
 
@@ -173,7 +185,7 @@ async function main(): Promise<void> {
     adverse.onFill(fill, lastFeatures);
     autoheal.onFill(fill, realizedDelta, adverse.getEma());
     metricsCalc.recordFill(fill);
-    log.info('fill', {
+    log.info(`${cycleTag()} fill`, {
       side: fill.side,
       token: fill.token,
       price: fill.price?.toFixed(4),
@@ -228,6 +240,43 @@ async function main(): Promise<void> {
   }
 
   let tickCount = 0;
+  let lastExpiryTs = 0; // tracks the expiry of the last cycle we saw
+  let completedCycles5m = 0;
+  let completedCycles15m = 0;
+
+  /** Returns seconds until current market expires, or Infinity if unknown. */
+  function secsToExpiry(): number {
+    if (!currentMarket || !currentMarket.endDateTs) return Infinity;
+    return currentMarket.endDateTs - Math.floor(Date.now() / 1000);
+  }
+
+  /** Format cycle tag for logging: [cycle=15m:HH:MM:SSZ] */
+  function cycleTag(): string {
+    if (!currentMarket) return '';
+    const interval = detectPrimaryInterval(currentMarket, cfg.targetIntervals) || '?';
+    const expiry = currentMarket.endDateTs;
+    if (!expiry) return `[cycle=${interval}:?]`;
+    const d = new Date(expiry * 1000);
+    const hms = d.toISOString().slice(11, 19);
+    return `[cycle=${interval}:${hms}Z]`;
+  }
+
+  // Track cycle completions on market rotation
+  discovery.on('rotation', ({ market }: { market: PolymarketMarket }) => {
+    // If we had a previous market and its expiry has passed, count as completed cycle
+    if (lastExpiryTs > 0 && lastExpiryTs <= Math.floor(Date.now() / 1000)) {
+      const prevInterval = currentMarket ? detectPrimaryInterval(currentMarket, cfg.targetIntervals) : null;
+      if (prevInterval === '5m') completedCycles5m++;
+      else if (prevInterval === '15m') completedCycles15m++;
+      metricsCalc.recordCycleComplete();
+      log.info(`${cycleTag()} cycle completed`, {
+        completedCycles5m,
+        completedCycles15m,
+        warmupComplete: metricsCalc.isWarmupComplete(),
+      });
+    }
+    lastExpiryTs = market.endDateTs || 0;
+  });
 
   // Main tick: compute features, regime, health, quote, and push telemetry.
   const tickTimer = setInterval(() => {
@@ -281,18 +330,61 @@ async function main(): Promise<void> {
       });
 
       const params = paramsStore.get();
-      const quote = quoteEngine.quote({
-        features,
-        regime: regSnap,
-        health: healthSnap,
-        inventory: inventory.state,
-        riskState,
-        params,
-        preemptiveCancelActive: cancelCoord.isActive(),
-      });
+
+      // Pre-expiry quiet period: cancel quotes and stop placing new ones near expiry
+      const ttlSecs = secsToExpiry();
+      let quietMode: 'none' | 'flatten' | 'no_orders' = 'none';
+      if (ttlSecs <= 15) {
+        quietMode = 'no_orders';
+      } else if (ttlSecs <= 30) {
+        quietMode = 'flatten';
+      }
+
+      if (quietMode !== 'none' && tickCount % 10 === 1) {
+        log.info(`${cycleTag()} [QUIET] contract ${currentMarket?.slug ?? '?'} T-${Math.round(ttlSecs)}s — ${quietMode === 'flatten' ? 'cancelling quotes, attempting flatten' : 'no orders, waiting for expiry'}`, {
+          residualInventory: inventory.state.yesPosition,
+        });
+      }
+
+      let quote;
+      if (quietMode === 'no_orders') {
+        // T-15 to T-0: no orders at all. Cancel everything.
+        orderManager.cancelAll('quiet_period_no_orders').catch((e) => log.warn('quiet cancelAll error', { err: String(e) }));
+        quote = quoteEngine.quote({
+          features,
+          regime: regSnap,
+          health: healthSnap,
+          inventory: inventory.state,
+          riskState,
+          params,
+          preemptiveCancelActive: true, // force blocked
+        });
+      } else if (quietMode === 'flatten') {
+        // T-30 to T-15: cancel normal quotes, attempt flatten
+        orderManager.cancelAll('quiet_period_flatten').catch((e) => log.warn('quiet cancelAll error', { err: String(e) }));
+        quote = quoteEngine.quote({
+          features,
+          regime: regSnap,
+          health: healthSnap,
+          inventory: inventory.state,
+          riskState,
+          params,
+          preemptiveCancelActive: true, // force blocked
+        });
+      } else {
+        quote = quoteEngine.quote({
+          features,
+          regime: regSnap,
+          health: healthSnap,
+          inventory: inventory.state,
+          riskState,
+          params,
+          preemptiveCancelActive: cancelCoord.isActive(),
+        });
+      }
 
       if (tickCount % 20 === 1) {
-        log.info('tick', {
+        log.info(`${cycleTag()} tick`, {
           asset,
           interval,
           mid: features.midYes?.toFixed(4),
@@ -303,11 +395,13 @@ async function main(): Promise<void> {
           fills: pnl.state().totalFills,
           pnl: pnl.state().net?.toFixed(2),
           activeOrders: orderManager.getActive().length,
+          ttlSecs: Math.round(ttlSecs),
+          quietMode: quietMode !== 'none' ? quietMode : undefined,
         });
       }
 
-      // Apply quote to order manager (paper or live)
-      if (cfg.mode !== 'live' || liveExec.isReady()) {
+      // Apply quote to order manager (paper or live) — skip during quiet period
+      if (quietMode === 'none' && (cfg.mode !== 'live' || liveExec.isReady())) {
         orderManager.applyQuote(quote).catch((e) => log.warn('applyQuote error', { err: String(e) }));
       }
 
@@ -354,7 +448,9 @@ async function main(): Promise<void> {
         cfg.inventoryMaxShares,
         pnl.state().gross,
         pnl.state().net,
-        tickCount
+        tickCount,
+        killThresholds,
+        pnl.state().net
       );
       metricsHistory.push(metrics);
 
