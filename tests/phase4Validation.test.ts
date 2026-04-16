@@ -3,6 +3,7 @@ import { InventoryEngine } from '../src/execution/inventoryEngine';
 import { RiskManager } from '../src/core/riskManager';
 import { QuoteEngine } from '../src/core/quoteEngine';
 import { AvellanedaStoikov } from '../src/core/avellaneda';
+import { TokenBucket } from '../src/execution/rateLimiter';
 import { FairValueModel } from '../src/core/fairValue';
 import { CancelCoordinator } from '../src/execution/cancelCoordinator';
 import { OrderManager } from '../src/execution/orderManager';
@@ -387,6 +388,30 @@ describe('Phase 4 Validation', () => {
         inventory: mkInv(),
       });
       expect(rm.getState()).toBe('EMERGENCY');
+    });
+  });
+
+  describe('Rate limit handling', () => {
+    it('take() succeeds when tokens available', async () => {
+      const bucket = new TokenBucket(8, 4);
+      await expect(bucket.take(1, 500)).resolves.toBeUndefined();
+      expect(bucket.availableTokens()).toBeCloseTo(7, 0);
+    });
+
+    it('take() throws on timeout when bucket is exhausted', async () => {
+      const bucket = new TokenBucket(2, 0.01); // tiny refill rate
+      await bucket.take(2, 500); // drain bucket
+      await expect(bucket.take(1, 200)).rejects.toThrow('rateLimiter.take() timeout');
+    });
+
+    it('take() does not hang indefinitely', async () => {
+      const bucket = new TokenBucket(1, 0.001);
+      await bucket.take(1, 100); // drain
+      const start = Date.now();
+      await expect(bucket.take(1, 300)).rejects.toThrow('rateLimiter.take() timeout');
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeGreaterThanOrEqual(250);
+      expect(elapsed).toBeLessThan(1000);
     });
   });
 
