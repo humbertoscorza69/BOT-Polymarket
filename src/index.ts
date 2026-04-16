@@ -18,6 +18,9 @@ import { RiskManager } from './core/riskManager';
 import { AutoHealing } from './core/autoHealing';
 import { PaperTrader } from './core/paperTrader';
 import { TelemetryHub } from './core/telemetry';
+import { MetricsCalculator, DEFAULT_KILL_THRESHOLDS, PaperTradingMetrics } from './core/metricsCalculator';
+import { MetricsExporter } from './core/metricsExporter';
+import { KillThresholdMonitor } from './core/killThresholdMonitor';
 import { CancelCoordinator } from './execution/cancelCoordinator';
 import { InventoryEngine } from './execution/inventoryEngine';
 import { OrderManager } from './execution/orderManager';
@@ -78,6 +81,13 @@ async function main(): Promise<void> {
   const adverse = new AdverseSelectionDetector(cfg);
   const risk = new RiskManager(cfg);
   const autoheal = new AutoHealing(cfg, paramsStore, () => adverse.getEma());
+
+  // Metrics framework (POL-14/POL-15)
+  const metricsCalc = new MetricsCalculator();
+  const metricsExporter = new MetricsExporter('./data/metrics');
+  const killMonitor = new KillThresholdMonitor(DEFAULT_KILL_THRESHOLDS);
+  const metricsHistory: PaperTradingMetrics[] = [];
+  const sessionStartTime = cfg.startTs;
 
   // Execution
   const cancelCoord = new CancelCoordinator({
@@ -161,6 +171,7 @@ async function main(): Promise<void> {
     pnl.recordFillRealized(fill, realizedDelta);
     adverse.onFill(fill, lastFeatures);
     autoheal.onFill(fill, realizedDelta, adverse.getEma());
+    metricsCalc.recordFill(fill);
     log.info('fill', {
       side: fill.side,
       token: fill.token,
@@ -227,6 +238,19 @@ async function main(): Promise<void> {
       lastFeatures = features;
       tickCount++;
       const regSnap = regime.update(features);
+      metricsCalc.recordRegimeTransition(regSnap.current);
+
+      // Track stale price events for metrics
+      if (lastPoly.stale) {
+        metricsCalc.recordStalePriceEvent();
+      }
+
+      // Track emergency mode triggers (inventory > 80% of max)
+      const invUtilPct = (Math.abs(inventory.state.yesPosition) / cfg.inventoryMaxShares) * 100;
+      if (invUtilPct >= cfg.inventoryEmergencyThresholdPct) {
+        metricsCalc.recordEmergencyModeTriggered();
+      }
+
       const healthSnap = health.evaluate({
         poly: lastPoly,
         bin: lastBin,
@@ -319,6 +343,47 @@ async function main(): Promise<void> {
           lastFillTs: fills.getLastFillTs(),
         },
       });
+
+      // Metrics framework: calculate, check kill thresholds, export
+      const metrics = metricsCalc.calculateMetrics(
+        cfg.quoteBaseHalfSpreadBps,
+        inventory.state,
+        cfg.inventoryMaxShares,
+        pnl.state().gross,
+        pnl.state().net,
+        tickCount
+      );
+      metricsHistory.push(metrics);
+
+      if (killMonitor.checkMetrics(metrics)) {
+        log.error('[METRICS] Kill threshold breached, stopping bot');
+        shutdown('KILL_THRESHOLD_BREACHED').catch((e) => log.error('shutdown error', { err: String(e) }));
+        return;
+      }
+
+      // Export metrics to CSV every 10 ticks
+      if (tickCount % 10 === 0) {
+        metricsExporter.exportMetrics(metrics);
+      }
+
+      // Pivot/kill decision at time gates
+      const hoursElapsed = (Date.now() - sessionStartTime) / (1000 * 60 * 60);
+      if (tickCount % 100 === 0 && hoursElapsed >= 4) {
+        const decision = killMonitor.decidePivotOrKill(metrics, hoursElapsed);
+        if (decision === 'kill') {
+          log.error('[METRICS] Hypothesis failed, killing session');
+          shutdown('HYPOTHESIS_FAILURE').catch((e) => log.error('shutdown error', { err: String(e) }));
+          return;
+        } else if (decision === 'pivot_h2') {
+          log.info('[METRICS] Pivoting to H2 — zero-fee quoting recommended');
+        }
+      }
+
+      // Daily summary at 24h mark
+      if (hoursElapsed >= 24 && tickCount % 100 === 0 && metricsHistory.length > 0) {
+        const summary = metricsExporter.generateDailySummary(metricsHistory);
+        log.info('[METRICS] Daily summary:\n' + summary);
+      }
     } catch (e) {
       log.error('tick error', { err: String(e) });
     }
