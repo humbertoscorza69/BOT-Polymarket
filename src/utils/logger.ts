@@ -76,9 +76,18 @@ export class Logger {
       try {
         this.sink(entry);
       } catch {
-        /* sink errors are ignored */
       }
     }
+  }
+
+  flush(): Promise<void> {
+    return new Promise((resolve) => {
+      if (this.fileStream && this.fileStream.writable) {
+        this.fileStream.end(() => resolve());
+      } else {
+        resolve();
+      }
+    });
   }
 }
 
@@ -108,4 +117,8 @@ export function initRootLogger(level: LogLevel, filePath?: string): Logger {
 export function getLogger(module: string): Logger {
   if (!rootLogger) rootLogger = new Logger('root', 'info');
   return rootLogger.child(module);
+}
+
+export async function flushLogs(): Promise<void> {
+  if (rootLogger) await rootLogger.flush();
 }

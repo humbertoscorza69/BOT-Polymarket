@@ -1,5 +1,5 @@
 import { buildConfig, BotConfig } from './config';
-import { initRootLogger, getLogger } from './utils/logger';
+import { initRootLogger, getLogger, flushLogs } from './utils/logger';
 import { DiscoveryEngine } from './adapters/discovery';
 import { PolymarketFeed } from './adapters/polymarketFeed';
 import { BinanceFeed } from './adapters/binanceFeed';
@@ -117,6 +117,7 @@ async function main(): Promise<void> {
   let lastPoly: PolySnapshot | null = null;
   let lastBin: BinanceSnapshot | null = null;
   let lastFeatures: ReturnType<FeatureStore['update']> = null;
+  let currentMarket: PolymarketMarket | null = null;
 
   const onPoly = (p: PolySnapshot): void => {
     lastPoly = p;
@@ -138,6 +139,7 @@ async function main(): Promise<void> {
   // Discovery wires markets into everything that needs them
   discovery.on('rotation', ({ market }: { market: PolymarketMarket }) => {
     log.info('rotating market', { slug: market.slug });
+    currentMarket = market;
     marketHistory.record(market, 'discovery');
     if (cfg.dataSource === 'sim') {
       simFeed.setMarket(market);
@@ -157,6 +159,14 @@ async function main(): Promise<void> {
     pnl.recordFillRealized(fill, realizedDelta);
     adverse.onFill(fill, lastFeatures);
     autoheal.onFill(fill, realizedDelta, adverse.getEma());
+    log.info('fill', {
+      side: fill.side,
+      token: fill.token,
+      price: fill.price?.toFixed(4),
+      size: fill.size?.toFixed(2),
+      regime: fill.regime,
+      pnl: pnl.state().net?.toFixed(2),
+    });
   });
 
   // latency arb defense wiring
@@ -201,17 +211,19 @@ async function main(): Promise<void> {
     discovery.emit('rotation', { market: simMkt });
   }
 
+  let tickCount = 0;
+
   // Main tick: compute features, regime, health, quote, and push telemetry.
   const tickTimer = setInterval(() => {
     if (shuttingDown) return;
     try {
-      if (!lastPoly || !discovery.getSelected()) return;
-      const selected = discovery.getSelected()!;
-      const asset = detectPrimaryAsset(selected, cfg.targetAssets) || cfg.targetAssets[0];
-      const interval = detectPrimaryInterval(selected, cfg.targetIntervals) || cfg.targetIntervals[0];
+      if (!lastPoly || !currentMarket) return;
+      const asset = detectPrimaryAsset(currentMarket, cfg.targetAssets) || cfg.targetAssets[0];
+      const interval = detectPrimaryInterval(currentMarket, cfg.targetIntervals) || cfg.targetIntervals[0];
       const features = featureStore.update(lastPoly, lastBin, asset, interval);
       if (!features) return;
       lastFeatures = features;
+      tickCount++;
       const regSnap = regime.update(features);
       const healthSnap = health.evaluate({
         poly: lastPoly,
@@ -249,6 +261,21 @@ async function main(): Promise<void> {
         params,
         preemptiveCancelActive: cancelCoord.isActive(),
       });
+
+      if (tickCount % 20 === 1) {
+        log.info('tick', {
+          asset,
+          interval,
+          mid: features.midYes?.toFixed(4),
+          regime: regSnap.current,
+          risk: riskState,
+          quoteMode: quote.mode,
+          blockedReason: quote.blockedReason,
+          fills: pnl.state().totalFills,
+          pnl: pnl.state().net?.toFixed(2),
+          activeOrders: orderManager.getActive().length,
+        });
+      }
 
       // Apply quote to order manager (paper or live)
       if (cfg.mode !== 'live' || liveExec.isReady()) {
@@ -342,6 +369,7 @@ async function main(): Promise<void> {
     const path = sessionStore.save(summary);
     log.info('session saved', { path });
     snapshotStore.save(`${cfg.runId}_final`, telemetry.getLast());
+    await flushLogs();
     process.exit(0);
   };
 

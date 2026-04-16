@@ -23,8 +23,8 @@ interface RawBookMsg {
   timestamp?: string;
   buys?: Array<{ price: string; size: string }>;
   sells?: Array<{ price: string; size: string }>;
-  // price_change and book events
-  changes?: Array<{ price: string; side: string; size: string }>;
+  changes?: Array<{ asset_id?: string; price: string; side: string; size: string }>;
+  price_changes?: Array<{ asset_id?: string; price: string; side: string; size: string; hash?: string; best_bid?: string; best_ask?: string }>;
   price?: string;
   side?: string;
   size?: string;
@@ -77,8 +77,10 @@ export class PolymarketFeed extends EventEmitter {
   private reconnectBackoff: Backoff;
   private reconnectCount = 0;
   private staleTimer: NodeJS.Timeout | null = null;
+  private pingTimer: NodeJS.Timeout | null = null;
   private midHistory = new RollingWindow(120);
   private lastSnapshot: PolySnapshot | null = null;
+  private msgCount = 0;
 
   constructor(private readonly cfg: BotConfig) {
     super();
@@ -96,6 +98,8 @@ export class PolymarketFeed extends EventEmitter {
     this.running = false;
     if (this.staleTimer) clearInterval(this.staleTimer);
     this.staleTimer = null;
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = null;
     if (this.ws) {
       try {
         this.ws.close();
@@ -191,17 +195,29 @@ export class PolymarketFeed extends EventEmitter {
         } catch (e) {
           log.warn('ws subscribe failed', { err: String(e) });
         }
+        if (this.pingTimer) clearInterval(this.pingTimer);
+        this.pingTimer = setInterval(() => {
+          try {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+              this.ws.send('PING');
+            }
+          } catch { /* ignore */ }
+        }, 10_000);
       });
 
       ws.on('message', (data) => {
         try {
           const text = data.toString();
-          // Polymarket sends JSON arrays of events
+          if (text === 'PONG') return;
+          this.msgCount++;
           const parsed = JSON.parse(text);
           if (Array.isArray(parsed)) {
             for (const msg of parsed) this.handleMessage(msg as RawBookMsg);
           } else {
             this.handleMessage(parsed as RawBookMsg);
+          }
+          if (this.msgCount <= 3) {
+            log.info('ws message', { eventType: parsed?.event_type ?? (Array.isArray(parsed) ? 'array' : 'object'), msgCount: this.msgCount });
           }
         } catch (e) {
           log.debug('bad message', { err: String(e) });
@@ -222,33 +238,40 @@ export class PolymarketFeed extends EventEmitter {
 
   private handleMessage(msg: RawBookMsg): void {
     if (!msg || !this.market) return;
-    const assetId = msg.asset_id ?? msg.market ?? '';
-    const isYes = assetId && this.market.yesTokenId && assetId === this.market.yesTokenId;
-    const isNo = assetId && this.market.noTokenId && assetId === this.market.noTokenId;
-    if (!isYes && !isNo) return;
-    const book = isYes ? this.state.yesBook : this.state.noBook;
-
     const t = msg.event_type ?? '';
+
     if (t === 'book' || msg.buys || msg.sells) {
+      const assetId = msg.asset_id ?? '';
+      const isYes = assetId === this.market.yesTokenId;
+      const isNo = assetId === this.market.noTokenId;
+      if (!isYes && !isNo) return;
+      const book = isYes ? this.state.yesBook : this.state.noBook;
       const buys = parseBookLevels(msg.buys);
       const sells = parseBookLevels(msg.sells);
       book.bids = buys;
       book.asks = sells;
       sortBook(book);
       book.ts = Date.now();
-    } else if (t === 'price_change' && Array.isArray(msg.changes)) {
-      for (const ch of msg.changes) {
+      this.state.lastUpdateTs = Date.now();
+      this.recompute();
+    } else if (t === 'price_change') {
+      const changes = msg.price_changes ?? msg.changes;
+      if (!Array.isArray(changes)) return;
+      for (const ch of changes) {
+        const assetId = ch.asset_id ?? msg.asset_id ?? '';
+        const isYes = assetId === this.market.yesTokenId;
+        const isNo = assetId === this.market.noTokenId;
+        if (!isYes && !isNo) continue;
+        const book = isYes ? this.state.yesBook : this.state.noBook;
         const p = parseFloat(ch.price);
         const s = parseFloat(ch.size);
         const side = (ch.side ?? '').toUpperCase();
         if (Number.isFinite(p)) mergeChange(book, side === 'BUY' ? 'BUY' : 'SELL', p, Number.isFinite(s) ? s : 0);
       }
-      book.ts = Date.now();
+      this.state.lastUpdateTs = Date.now();
+      this.recompute();
     } else if (t === 'tick_size_change') {
-      // ignored for now
     }
-    this.state.lastUpdateTs = Date.now();
-    this.recompute();
   }
 
   private recompute(): void {
