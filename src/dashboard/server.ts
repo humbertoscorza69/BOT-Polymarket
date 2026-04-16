@@ -17,7 +17,7 @@ export class DashboardServer {
     private readonly cfg: BotConfig,
     private readonly telemetry: TelemetryHub,
   ) {
-    const staticDir = path.join(process.cwd(), 'public');
+    const staticDir = path.join(__dirname, '..', '..', 'public');
     this.app.use('/', express.static(staticDir));
     this.app.get('/api/snapshot', (req, res) => {
       res.json(serializeForDashboard(this.telemetry.getLast()));

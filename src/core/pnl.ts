@@ -51,8 +51,8 @@ export class PnlTracker {
   recordFillRealized(fill: Fill, realizedDelta: number): void {
     this.s.realized += realizedDelta;
     this.s.fees += fill.feeUsdc;
-    this.s.gross += realizedDelta + fill.feeUsdc;
-    this.s.net = this.s.realized;
+    this.s.gross = this.s.realized;
+    this.s.net = this.s.realized - this.s.fees;
     this.s.totalFills += 1;
 
     if (realizedDelta > 0) {

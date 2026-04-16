@@ -18,7 +18,6 @@ export class FillsStore {
   }
 
   forRun(runId: string): Fill[] {
-    // runId is embedded via ID prefix elsewhere; filter by ts fallback
-    return this.all().filter((f) => f.id.includes(runId) || true);
+    return this.all().filter((f) => f.runId === runId);
   }
 }

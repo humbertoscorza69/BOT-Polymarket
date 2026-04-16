@@ -120,6 +120,12 @@ export interface EnvConfig {
   rateLimitOrdersPerSec: number;
   rateLimitBurst: number;
 
+  cancelVelocityBpsTrigger: number;
+  cancelAggressorTrigger: number;
+  cancelFreezeMs: number;
+
+  tickMs: number;
+
   polyPrivateKey: string;
   polyFunderAddress: string;
   polyApiKey: string;
@@ -210,6 +216,12 @@ export function loadEnv(): EnvConfig {
     orderPostOnly: bool(e.ORDER_POST_ONLY, true),
     rateLimitOrdersPerSec: num(e.RATE_LIMIT_ORDERS_PER_SEC, 4),
     rateLimitBurst: num(e.RATE_LIMIT_BURST, 8),
+
+    cancelVelocityBpsTrigger: num(e.CANCEL_VELOCITY_BPS_TRIGGER, 12),
+    cancelAggressorTrigger: num(e.CANCEL_AGGRESSOR_TRIGGER, 0.55),
+    cancelFreezeMs: num(e.CANCEL_FREEZE_MS, 1200),
+
+    tickMs: num(e.TICK_MS, 500),
 
     polyPrivateKey: str(e.POLY_PRIVATE_KEY, ''),
     polyFunderAddress: str(e.POLY_FUNDER_ADDRESS, ''),

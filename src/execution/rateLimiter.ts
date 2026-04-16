@@ -19,8 +19,10 @@ export class TokenBucket {
     return false;
   }
 
-  async take(n = 1): Promise<void> {
+  async take(n = 1, timeoutMs = 5000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     while (!this.tryTake(n)) {
+      if (Date.now() > deadline) throw new Error('rateLimiter.take() timeout');
       await new Promise((r) => setTimeout(r, 50));
     }
   }

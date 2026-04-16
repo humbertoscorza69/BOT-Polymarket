@@ -43,6 +43,11 @@ export interface PolymarketMarket {
   // numeric proxy for liquidity; may be missing
   liquidityNum?: number;
   volumeNum?: number;
+  // outcome prices from API (yes price, no price)
+  outcomePriceYes?: number;
+  outcomePriceNo?: number;
+  // event grouping info
+  groupItemTitle?: string;
   // discovery metadata
   raw?: unknown;
 }
@@ -162,7 +167,7 @@ export interface QuoteIntent {
   side: OrderSide;
   token: 'YES' | 'NO';
   price: number; // 0..1
-  sizeUsdc: number;
+  sizeShares: number; // share count (USDC notional / price)
   tokenId: string;
   postOnly: boolean;
   quoteId: string;
@@ -195,6 +200,7 @@ export interface Fill {
   isMaker: boolean;
   latencyMs: number;
   mode: Mode;
+  runId: string;
 }
 
 export interface AdverseSelectionSample {

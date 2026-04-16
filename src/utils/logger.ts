@@ -82,11 +82,14 @@ export class Logger {
   }
 }
 
+const SENSITIVE_KEYS = /^(private[_-]?key|secret|passphrase|api[_-]?key|password|token)$/i;
+
 function safeJson(obj: unknown): string {
   try {
-    return JSON.stringify(obj, (_k, v) => {
+    return JSON.stringify(obj, (k, v) => {
       if (typeof v === 'bigint') return v.toString();
       if (v instanceof Error) return { message: v.message, stack: v.stack };
+      if (typeof k === 'string' && SENSITIVE_KEYS.test(k) && typeof v === 'string') return '[REDACTED]';
       return v;
     });
   } catch {

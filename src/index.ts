@@ -36,7 +36,6 @@ import {
   PolySnapshot,
   SessionSummary,
 } from './types';
-import { newFillId } from './utils/ids';
 
 async function main(): Promise<void> {
   const cfg: BotConfig = buildConfig();
@@ -80,9 +79,9 @@ async function main(): Promise<void> {
 
   // Execution
   const cancelCoord = new CancelCoordinator({
-    velocityBpsTrigger: 12,
-    aggressorTrigger: 0.55,
-    freezeMs: 1200,
+    velocityBpsTrigger: cfg.cancelVelocityBpsTrigger,
+    aggressorTrigger: cfg.cancelAggressorTrigger,
+    freezeMs: cfg.cancelFreezeMs,
   });
   const paper = new PaperTrader(cfg);
   const clob = new ClobDriver(cfg);
@@ -160,14 +159,10 @@ async function main(): Promise<void> {
     autoheal.onFill(fill, realizedDelta, adverse.getEma());
   });
 
-  paper.on('fill', (fill: Fill) => {
-    // paper trader fills go through order manager already; but keep fallback
-  });
-
   // latency arb defense wiring
   cancelCoord.on('cancelAll', (reason: string) => {
     log.info('latency-arb trigger', { reason });
-    orderManager.cancelAll(reason).catch(() => { /* ignore */ });
+    orderManager.cancelAll(reason).catch((e) => log.warn('cancelAll error', { err: String(e) }));
   });
 
   // Start services
@@ -207,8 +202,8 @@ async function main(): Promise<void> {
   }
 
   // Main tick: compute features, regime, health, quote, and push telemetry.
-  const tickMs = 500;
   const tickTimer = setInterval(() => {
+    if (shuttingDown) return;
     try {
       if (!lastPoly || !discovery.getSelected()) return;
       const selected = discovery.getSelected()!;
@@ -298,10 +293,12 @@ async function main(): Promise<void> {
     } catch (e) {
       log.error('tick error', { err: String(e) });
     }
-  }, tickMs);
+  }, cfg.tickMs);
 
-  // Graceful shutdown
+  let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log.warn('shutdown requested', { signal });
     clearInterval(tickTimer);
     autoheal.stop();
@@ -348,8 +345,8 @@ async function main(): Promise<void> {
     process.exit(0);
   };
 
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => { shutdown('SIGINT').catch((e) => console.error('shutdown error', e)); });
+  process.on('SIGTERM', () => { shutdown('SIGTERM').catch((e) => console.error('shutdown error', e)); });
   process.on('uncaughtException', (e) => {
     log.error('uncaughtException', { err: String(e), stack: e.stack });
   });
@@ -367,6 +364,13 @@ function summaryRegime(
 }
 
 function detectPrimaryAsset(m: PolymarketMarket, targets: string[]): string | null {
+  // First try to extract from slug pattern: {asset}-updown-{interval}-{windowTs}
+  const parts = m.slug.split('-');
+  if (parts.length >= 4 && parts[1] === 'updown') {
+    const slugAsset = parts[0].toUpperCase();
+    if (targets.includes(slugAsset)) return slugAsset;
+  }
+  // Fallback: text match
   const text = (`${m.question} ${m.slug} ${(m.tags ?? []).join(' ')} ${m.category ?? ''}`).toLowerCase();
   const aliases: Record<string, string[]> = {
     BTC: ['btc', 'bitcoin'],
@@ -386,6 +390,13 @@ function detectPrimaryAsset(m: PolymarketMarket, targets: string[]): string | nu
 }
 
 function detectPrimaryInterval(m: PolymarketMarket, targets: string[]): string | null {
+  // First try to extract from slug pattern: {asset}-updown-{interval}-{windowTs}
+  const parts = m.slug.split('-');
+  if (parts.length >= 4 && parts[1] === 'updown') {
+    const slugInterval = parts[2];
+    if (targets.includes(slugInterval)) return slugInterval;
+  }
+  // Fallback: text match
   const t = (`${m.question} ${m.slug} ${(m.tags ?? []).join(' ')}`).toLowerCase();
   for (const iv of targets) {
     if (t.includes(iv)) return iv;

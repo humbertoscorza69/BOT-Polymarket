@@ -212,10 +212,4 @@ export class FeatureStore {
     return this.midHistory.values();
   }
 
-  /**
-   * Provide per-regime features useful for downstream (labeled outside).
-   */
-  tagRegime(_: Regime): void {
-    // reserved for per-regime feature forking
-  }
 }

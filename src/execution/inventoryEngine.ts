@@ -2,6 +2,9 @@ import EventEmitter from 'eventemitter3';
 import { BotConfig } from '../config';
 import { Fill, InventoryState } from '../types';
 import { clamp } from '../utils/math';
+import { getLogger } from '../utils/logger';
+
+const log = getLogger('inventory');
 
 export class InventoryEngine extends EventEmitter {
   private s: InventoryState;
@@ -23,6 +26,12 @@ export class InventoryEngine extends EventEmitter {
 
   get state(): InventoryState {
     return this.s;
+  }
+
+  forceBalance(usdc: number): void {
+    this.s.freeUsdc = usdc;
+    this.s.lastUpdate = Date.now();
+    this.emit('update', this.s);
   }
 
   /**
@@ -50,8 +59,8 @@ export class InventoryEngine extends EventEmitter {
         this.s.yesPosition -= reduce;
         this.s.freeUsdc += reduce * price;
         if (size > reduce) {
-          // short YES — we don't allow short YES in this model; treat as NO-equivalent but accept it as a reduction only.
-          // This prevents runaway short. Log and absorb.
+          const excess = size - reduce;
+          log.warn('short YES rejected; excess shares dropped', { excess, price, size, position: this.s.yesPosition });
         }
       }
     } else {
@@ -90,8 +99,8 @@ export class InventoryEngine extends EventEmitter {
 
   private recomputeSkew(midYes: number | null = null): void {
     // normalized skew considers notional YES exposure minus NO exposure / max cap
-    const y = this.s.yesPosition * ((midYes ?? this.s.yesAvgCost) || 0.5);
-    const n = this.s.noPosition * ((midYes !== null ? 1 - midYes : this.s.noAvgCost) || 0.5);
+    const y = this.s.yesPosition * ((midYes ?? this.s.yesAvgCost) ?? 0.5);
+    const n = this.s.noPosition * ((midYes !== null ? 1 - midYes : this.s.noAvgCost) ?? 0.5);
     const cap = Math.max(1, this.cfg.riskMaxInventoryUsdc);
     this.s.normalizedSkew = clamp((y - n) / cap, -1, 1);
   }

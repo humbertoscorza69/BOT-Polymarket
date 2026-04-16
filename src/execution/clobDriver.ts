@@ -169,7 +169,11 @@ export class ClobDriver {
         feeRateBps: 0,
       };
       const built = await this.client.createOrder(order);
-      const r = await this.client.postOrder(built, inp.postOnly ? (clobLib?.OrderType?.GTC ?? 'GTC') : (clobLib?.OrderType?.GTC ?? 'GTC'));
+      const orderType = clobLib?.OrderType?.GTC ?? 'GTC';
+      const r = await this.client.postOrder(built, orderType);
+      if (inp.postOnly) {
+        log.debug('post-only enforced client-side (no native POTO order type in CLOB SDK); spread-cross guard in QuoteEngine prevents taking');
+      }
       const orderId = String(r?.orderID ?? r?.orderId ?? r?.id ?? '');
       const success = Boolean(r?.success ?? orderId);
       return { orderId, success, raw: r, errorMsg: success ? undefined : String(r?.errorMsg ?? r?.error ?? 'unknown') };

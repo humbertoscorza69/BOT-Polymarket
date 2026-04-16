@@ -34,6 +34,7 @@ describe('AdverseSelectionDetector', () => {
       isMaker: true,
       latencyMs: 10,
       mode: 'paper',
+      runId: 'test-run',
     };
     a.onFill(fill, null);
     // move mid down => adverse to a BUY

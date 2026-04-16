@@ -104,7 +104,7 @@ export function serializeForDashboard(s: Partial<TelemetrySnapshot>): Record<str
     token: o.token,
     side: o.side,
     price: o.price,
-    sizeUsdc: o.sizeUsdc,
+    sizeShares: o.sizeShares,
     filledSize: o.filledSize,
     status: o.status,
     ageMs: Date.now() - o.createdAt,

@@ -31,6 +31,7 @@ export class OrderManager extends EventEmitter {
   private rejections = 0;
   private replaceCount = 0;
   private market: PolymarketMarket | null = null;
+  private cancelling = false;
 
   constructor(private readonly opts: OrderManagerOpts) {
     super();
@@ -75,25 +76,25 @@ export class OrderManager extends EventEmitter {
   }
 
   async applyQuote(q: QuoteResult): Promise<void> {
+    if (this.cancelling) return;
     if (!this.market) return;
     if (q.mode === 'blocked') {
-      // cancel everything since we can't quote
       await this.cancelAll(q.blockedReason ?? 'blocked');
       return;
     }
 
-    const want: Array<{ side: 'BUY' | 'SELL'; token: 'YES' | 'NO'; price: number; sizeUsdc: number; tokenId: string }> = [];
+    const want: Array<{ side: 'BUY' | 'SELL'; token: 'YES' | 'NO'; price: number; sizeShares: number; tokenId: string }> = [];
     if (q.yesBid !== null && q.yesBidSize > 0) {
-      want.push({ side: 'BUY', token: 'YES', price: q.yesBid, sizeUsdc: q.yesBidSize, tokenId: this.market.yesTokenId });
+      want.push({ side: 'BUY', token: 'YES', price: q.yesBid, sizeShares: q.yesBidSize, tokenId: this.market.yesTokenId });
     }
     if (q.yesAsk !== null && q.yesAskSize > 0) {
-      want.push({ side: 'SELL', token: 'YES', price: q.yesAsk, sizeUsdc: q.yesAskSize, tokenId: this.market.yesTokenId });
+      want.push({ side: 'SELL', token: 'YES', price: q.yesAsk, sizeShares: q.yesAskSize, tokenId: this.market.yesTokenId });
     }
     if (q.noBid !== null && q.noBidSize > 0) {
-      want.push({ side: 'BUY', token: 'NO', price: q.noBid, sizeUsdc: q.noBidSize, tokenId: this.market.noTokenId });
+      want.push({ side: 'BUY', token: 'NO', price: q.noBid, sizeShares: q.noBidSize, tokenId: this.market.noTokenId });
     }
     if (q.noAsk !== null && q.noAskSize > 0) {
-      want.push({ side: 'SELL', token: 'NO', price: q.noAsk, sizeUsdc: q.noAskSize, tokenId: this.market.noTokenId });
+      want.push({ side: 'SELL', token: 'NO', price: q.noAsk, sizeShares: q.noAskSize, tokenId: this.market.noTokenId });
     }
 
     // match existing orders by (token, side); either keep, replace, or cancel
@@ -130,14 +131,14 @@ export class OrderManager extends EventEmitter {
     side: 'BUY' | 'SELL';
     token: 'YES' | 'NO';
     price: number;
-    sizeUsdc: number;
+    sizeShares: number;
     tokenId: string;
   }): Promise<void> {
     const intent: QuoteIntent = {
       side: w.side,
       token: w.token,
       price: w.price,
-      sizeUsdc: w.sizeUsdc,
+      sizeShares: w.sizeShares,
       tokenId: w.tokenId,
       postOnly: this.opts.cfg.orderPostOnly,
       quoteId: newQuoteId(),
@@ -152,12 +153,11 @@ export class OrderManager extends EventEmitter {
         this.emit('placed', active);
       } else if (this.opts.mode === 'live') {
         if (!this.opts.clob || !this.opts.clob.isAvailable) throw new Error('clob driver unavailable');
-        const shares = w.sizeUsdc / Math.max(0.02, w.price);
         const r = await this.opts.clob.placeOrder({
           tokenId: w.tokenId,
           side: w.side,
           price: w.price,
-          size: shares,
+          size: w.sizeShares,
           postOnly: this.opts.cfg.orderPostOnly,
         });
         if (!r.success) {
@@ -200,18 +200,23 @@ export class OrderManager extends EventEmitter {
   }
 
   async cancelAll(reason: string): Promise<number> {
-    let n = 0;
-    for (const o of [...this.active.values()]) {
-      const ok = await this.cancel(o.quoteId, reason);
-      if (ok) n += 1;
-    }
-    if (this.opts.mode === 'live' && this.opts.clob?.isAvailable) {
-      try {
-        await this.opts.clob.cancelAll();
-      } catch (e) {
-        log.warn('live cancelAll failed', { err: String(e) });
+    this.cancelling = true;
+    try {
+      let n = 0;
+      for (const o of [...this.active.values()]) {
+        const ok = await this.cancel(o.quoteId, reason);
+        if (ok) n += 1;
       }
+      if (this.opts.mode === 'live' && this.opts.clob?.isAvailable) {
+        try {
+          await this.opts.clob.cancelAll();
+        } catch (e) {
+          log.warn('live cancelAll failed', { err: String(e) });
+        }
+      }
+      return n;
+    } finally {
+      this.cancelling = false;
     }
-    return n;
   }
 }

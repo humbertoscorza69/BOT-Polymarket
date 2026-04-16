@@ -67,7 +67,7 @@ export class Reconciler {
           localFree: this.inventory.state.freeUsdc,
           exchange: bal.usdc,
         });
-        this.inventory.state.freeUsdc = bal.usdc;
+        this.inventory.forceBalance(bal.usdc);
       }
       this.last = {
         ok: true,

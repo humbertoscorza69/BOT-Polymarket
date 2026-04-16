@@ -124,7 +124,7 @@ export class PaperTrader extends EventEmitter {
 
       const fillProb = this.computeFillProb(o, f);
       if (Math.random() < fillProb) {
-        const remaining = o.sizeUsdc - o.filledSize;
+        const remaining = o.sizeShares - o.filledSize;
         const partial = Math.random() < this.cfg.paperPartialFillProb;
         const fillSize = partial ? remaining * (0.2 + Math.random() * 0.6) : remaining;
         const slippageBps = this.cfg.paperSlippageBps * (0.5 + Math.random());
@@ -153,8 +153,9 @@ export class PaperTrader extends EventEmitter {
           isMaker: true,
           latencyMs: this.cfg.paperLatencyMs,
           mode: 'paper',
+          runId: this.cfg.runId,
         };
-        if (o.filledSize + 0.01 >= o.sizeUsdc) {
+        if (o.filledSize + 0.01 >= o.sizeShares) {
           o.status = 'filled';
           this.orders.delete(o.quoteId);
         } else {
