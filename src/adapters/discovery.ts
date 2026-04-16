@@ -348,7 +348,12 @@ export class DiscoveryEngine extends EventEmitter {
       const ttl = m.endDateTs - now;
       if (ttl <= 0) continue;
 
-      // Extract asset and interval from slug
+      if (m.volumeNum !== undefined && m.volumeNum < this.cfg.discoveryMinVolumeUsdc) continue;
+
+      const ttrHours = ttl / 3600;
+      if (ttrHours < this.cfg.discoveryMinTtrHours) continue;
+      if (ttrHours > this.cfg.discoveryMaxTtrDays * 24) continue;
+
       const { asset, interval } = parseSlugMeta(m.slug);
       if (!asset || !interval) continue;
 
@@ -366,9 +371,15 @@ export class DiscoveryEngine extends EventEmitter {
       const yesPrice = m.outcomePriceYes ?? 0.5;
       components.priceBalance = 1 - Math.abs(yesPrice - 0.5) * 2; // 1.0 at 0.50, 0.0 at 0/1
 
-      // Volume score
+      if (components.priceBalance < 1 - this.cfg.discoveryMaxInitialSpreadBps / 500) {
+        components.priceBalance *= 0.5;
+      }
+
       const volRaw = m.volumeNum ?? 0;
-      components.volume = Math.min(1, Math.log10(1 + volRaw) / 6);
+      const volumeScore = Math.min(1, Math.log10(1 + volRaw) / 6);
+      components.volume = volumeScore;
+      const ttlScore = Math.min(1, ttl / intervalSecs);
+      components.ttl = ttlScore * this.cfg.quoteTtrWeight;
 
       const score =
         components.liquidity * 1.2 +

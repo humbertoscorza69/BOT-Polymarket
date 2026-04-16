@@ -279,7 +279,7 @@ export class BinanceFeed extends EventEmitter {
     const tradeAge = now - this.lastTradeUpdate;
     const bookAge = now - this.lastBookUpdate;
     const age = Math.max(tradeAge, bookAge);
-    const stale = age > this.cfg.binanceFeedStaleMs;
+    const stale = age > this.cfg.freshnessBinanceMaxStaleMs;
 
     const snap: BinanceSnapshot = {
       symbol: this.symbol,

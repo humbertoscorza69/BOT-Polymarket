@@ -138,6 +138,23 @@ export interface EnvConfig {
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 
   discordWebhookUrl: string;
+
+  quoteBaseHalfSpreadBps: number;
+  quoteSkewFactor: number;
+  quoteTtrWeight: number;
+  quoteRegimeSensitivity: number;
+
+  inventoryMaxShares: number;
+  inventoryEmergencyThresholdPct: number;
+
+  discoveryMinVolumeUsdc: number;
+  discoveryMaxInitialSpreadBps: number;
+  discoveryMinTtrHours: number;
+  discoveryMaxTtrDays: number;
+
+  freshnessPolyMaxStaleMs: number;
+  freshnessBinanceMaxStaleMs: number;
+  freshnessMinOrderbookDepth: number;
 }
 
 export function loadEnv(): EnvConfig {
@@ -235,9 +252,27 @@ export function loadEnv(): EnvConfig {
     logLevel: (str(e.LOG_LEVEL, 'info') as EnvConfig['logLevel']),
 
     discordWebhookUrl: str(e.DISCORD_WEBHOOK_URL, ''),
+
+    quoteBaseHalfSpreadBps: num(e.QUOTE_BASE_HALF_SPREAD_BPS, 150),
+    quoteSkewFactor: num(e.QUOTE_SKEW_FACTOR, 2.0),
+    quoteTtrWeight: num(e.QUOTE_TTR_WEIGHT, 1.0),
+    quoteRegimeSensitivity: num(e.QUOTE_REGIME_SENSITIVITY, 1.0),
+
+    inventoryMaxShares: num(e.INVENTORY_MAX_SHARES, 1000),
+    inventoryEmergencyThresholdPct: num(e.INVENTORY_EMERGENCY_THRESHOLD_PCT, 80),
+
+    discoveryMinVolumeUsdc: num(e.DISCOVERY_MIN_VOLUME_USDC, 10000),
+    discoveryMaxInitialSpreadBps: num(e.DISCOVERY_MAX_INITIAL_SPREAD_BPS, 200),
+    discoveryMinTtrHours: num(e.DISCOVERY_MIN_TTR_HOURS, 12),
+    discoveryMaxTtrDays: num(e.DISCOVERY_MAX_TTR_DAYS, 30),
+
+    freshnessPolyMaxStaleMs: num(e.FRESHNESS_POLY_MAX_STALE_MS, 5000),
+    freshnessBinanceMaxStaleMs: num(e.FRESHNESS_BINANCE_MAX_STALE_MS, 15000),
+    freshnessMinOrderbookDepth: num(e.FRESHNESS_MIN_ORDERBOOK_DEPTH, 3),
   };
 
   validateSanity(cfg);
+  validatePol2Ranges(cfg);
   return cfg;
 }
 
@@ -260,4 +295,79 @@ export function validateSanity(cfg: EnvConfig): void {
       throw new Error('MODE=live requires POLY_PRIVATE_KEY and POLY_FUNDER_ADDRESS');
     }
   }
+}
+
+export interface RangeRule {
+  min: number;
+  max: number;
+}
+
+export const POL2_RANGES: Record<string, RangeRule> = {
+  QUOTE_BASE_HALF_SPREAD_BPS: { min: 50, max: 400 },
+  QUOTE_SKEW_FACTOR: { min: 1.0, max: 5.0 },
+  QUOTE_TTR_WEIGHT: { min: 0.5, max: 2.0 },
+  QUOTE_REGIME_SENSITIVITY: { min: 0.5, max: 2.0 },
+  INVENTORY_MAX_SHARES: { min: 500, max: 5000 },
+  INVENTORY_EMERGENCY_THRESHOLD_PCT: { min: 60, max: 95 },
+  DISCOVERY_MIN_VOLUME_USDC: { min: 5000, max: 50000 },
+  DISCOVERY_MAX_INITIAL_SPREAD_BPS: { min: 100, max: 500 },
+  DISCOVERY_MIN_TTR_HOURS: { min: 1, max: 168 },
+  DISCOVERY_MAX_TTR_DAYS: { min: 7, max: 365 },
+  FRESHNESS_POLY_MAX_STALE_MS: { min: 1000, max: 15000 },
+  FRESHNESS_BINANCE_MAX_STALE_MS: { min: 5000, max: 60000 },
+  FRESHNESS_MIN_ORDERBOOK_DEPTH: { min: 1, max: 10 },
+  RISK_CANCEL_VELOCITY_BPS_TRIGGER: { min: 5, max: 30 },
+  RISK_CANCEL_AGGRESSOR_THRESHOLD: { min: 0.4, max: 0.7 },
+  RISK_CANCEL_FREEZE_MS: { min: 500, max: 5000 },
+  CONTROL_TICK_MS: { min: 100, max: 5000 },
+};
+
+export function validatePol2Ranges(cfg: EnvConfig): void {
+  const checks: Array<[string, number]> = [
+    ['QUOTE_BASE_HALF_SPREAD_BPS', cfg.quoteBaseHalfSpreadBps],
+    ['QUOTE_SKEW_FACTOR', cfg.quoteSkewFactor],
+    ['QUOTE_TTR_WEIGHT', cfg.quoteTtrWeight],
+    ['QUOTE_REGIME_SENSITIVITY', cfg.quoteRegimeSensitivity],
+    ['INVENTORY_MAX_SHARES', cfg.inventoryMaxShares],
+    ['INVENTORY_EMERGENCY_THRESHOLD_PCT', cfg.inventoryEmergencyThresholdPct],
+    ['DISCOVERY_MIN_VOLUME_USDC', cfg.discoveryMinVolumeUsdc],
+    ['DISCOVERY_MAX_INITIAL_SPREAD_BPS', cfg.discoveryMaxInitialSpreadBps],
+    ['DISCOVERY_MIN_TTR_HOURS', cfg.discoveryMinTtrHours],
+    ['DISCOVERY_MAX_TTR_DAYS', cfg.discoveryMaxTtrDays],
+    ['FRESHNESS_POLY_MAX_STALE_MS', cfg.freshnessPolyMaxStaleMs],
+    ['FRESHNESS_BINANCE_MAX_STALE_MS', cfg.freshnessBinanceMaxStaleMs],
+    ['FRESHNESS_MIN_ORDERBOOK_DEPTH', cfg.freshnessMinOrderbookDepth],
+    ['RISK_CANCEL_VELOCITY_BPS_TRIGGER', cfg.cancelVelocityBpsTrigger],
+    ['RISK_CANCEL_AGGRESSOR_THRESHOLD', cfg.cancelAggressorTrigger],
+    ['RISK_CANCEL_FREEZE_MS', cfg.cancelFreezeMs],
+    ['CONTROL_TICK_MS', cfg.tickMs],
+  ];
+  for (const [name, val] of checks) {
+    const rule = POL2_RANGES[name];
+    if (val < rule.min || val > rule.max) {
+      throw new Error(`${name}=${val} out of range [${rule.min}, ${rule.max}]`);
+    }
+  }
+}
+
+export function getPol2Params(cfg: EnvConfig): Record<string, number> {
+  return {
+    QUOTE_BASE_HALF_SPREAD_BPS: cfg.quoteBaseHalfSpreadBps,
+    QUOTE_SKEW_FACTOR: cfg.quoteSkewFactor,
+    QUOTE_TTR_WEIGHT: cfg.quoteTtrWeight,
+    QUOTE_REGIME_SENSITIVITY: cfg.quoteRegimeSensitivity,
+    INVENTORY_MAX_SHARES: cfg.inventoryMaxShares,
+    INVENTORY_EMERGENCY_THRESHOLD_PCT: cfg.inventoryEmergencyThresholdPct,
+    DISCOVERY_MIN_VOLUME_USDC: cfg.discoveryMinVolumeUsdc,
+    DISCOVERY_MAX_INITIAL_SPREAD_BPS: cfg.discoveryMaxInitialSpreadBps,
+    DISCOVERY_MIN_TTR_HOURS: cfg.discoveryMinTtrHours,
+    DISCOVERY_MAX_TTR_DAYS: cfg.discoveryMaxTtrDays,
+    FRESHNESS_POLY_MAX_STALE_MS: cfg.freshnessPolyMaxStaleMs,
+    FRESHNESS_BINANCE_MAX_STALE_MS: cfg.freshnessBinanceMaxStaleMs,
+    FRESHNESS_MIN_ORDERBOOK_DEPTH: cfg.freshnessMinOrderbookDepth,
+    RISK_CANCEL_VELOCITY_BPS_TRIGGER: cfg.cancelVelocityBpsTrigger,
+    RISK_CANCEL_AGGRESSOR_THRESHOLD: cfg.cancelAggressorTrigger,
+    RISK_CANCEL_FREEZE_MS: cfg.cancelFreezeMs,
+    CONTROL_TICK_MS: cfg.tickMs,
+  };
 }

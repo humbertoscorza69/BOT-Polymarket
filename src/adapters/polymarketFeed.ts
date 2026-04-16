@@ -306,7 +306,7 @@ export class PolymarketFeed extends EventEmitter {
     if (mid !== null) this.midHistory.push(mid);
 
     const age = Date.now() - this.state.lastUpdateTs;
-    const stale = age > this.cfg.polyFeedStaleMs;
+    const stale = age > this.cfg.freshnessPolyMaxStaleMs;
 
     const snap: PolySnapshot = {
       market: this.market,
@@ -331,7 +331,7 @@ export class PolymarketFeed extends EventEmitter {
   private checkStale(): void {
     if (!this.lastSnapshot) return;
     const age = Date.now() - this.state.lastUpdateTs;
-    const stale = age > this.cfg.polyFeedStaleMs;
+    const stale = age > this.cfg.freshnessPolyMaxStaleMs;
     if (stale !== this.lastSnapshot.stale) {
       this.lastSnapshot = { ...this.lastSnapshot, stale, feedAgeMs: age };
       this.emit('snapshot', this.lastSnapshot);

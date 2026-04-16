@@ -96,6 +96,16 @@ export class HealthEngine {
         score -= 0.1;
         sizingPenalty *= 0.8;
       }
+      const minDepth = this.cfg.freshnessMinOrderbookDepth;
+      const bidDepth = inp.poly?.yesBook.bids.length ?? 0;
+      const askDepth = inp.poly?.yesBook.asks.length ?? 0;
+      if (bidDepth < minDepth || askDepth < minDepth) {
+        reasons.push(`shallow book depth (<${minDepth})`);
+        codes.push('SHALLOW_DEPTH');
+        score -= 0.1;
+        sizingPenalty *= 0.8;
+        spreadPenalty += 5;
+      }
     }
 
     if (inp.adverseSelectionEma > this.cfg.riskToxicFlowEmaCap * 0.7) {

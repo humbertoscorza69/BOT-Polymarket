@@ -1,5 +1,6 @@
 import { buildConfig, BotConfig } from './config';
 import { initRootLogger, getLogger, flushLogs } from './utils/logger';
+import { getPol2Params } from './env';
 import { DiscoveryEngine } from './adapters/discovery';
 import { PolymarketFeed } from './adapters/polymarketFeed';
 import { BinanceFeed } from './adapters/binanceFeed';
@@ -54,6 +55,7 @@ async function main(): Promise<void> {
     intervals: cfg.targetIntervals,
     runId: cfg.runId,
   });
+  log.info('POL-2 parameters', getPol2Params(cfg));
   if (cfg.mode === 'live') {
     log.warn('★★★ LIVE MODE — REAL ORDERS WILL BE PLACED ★★★');
   }

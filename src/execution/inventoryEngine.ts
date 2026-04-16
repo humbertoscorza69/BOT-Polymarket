@@ -113,4 +113,10 @@ export class InventoryEngine extends EventEmitter {
     if (token === 'YES') return currentYesUsdc + sizeUsdc <= cap;
     return currentNoUsdc + sizeUsdc <= cap;
   }
+
+  get emergencyTriggered(): boolean {
+    const maxShares = this.cfg.inventoryMaxShares;
+    const threshold = this.cfg.inventoryEmergencyThresholdPct / 100;
+    return this.s.yesPosition > maxShares * threshold || this.s.noPosition > maxShares * threshold;
+  }
 }

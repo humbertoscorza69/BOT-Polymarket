@@ -98,9 +98,9 @@ export class QuoteEngine {
       health.spreadPenalty + params.spreadBias + this.regimeSpreadAdd(regime) + this.adverseSpreadAdd(features.toxicFlowProxy);
     const extraSpreadProb = extraSpreadBps / 10_000;
 
-    // minimum edge enforcement
+    const baseHalfSpreadProb = this.cfg.quoteBaseHalfSpreadBps / 10_000;
     const minEdgeProb = this.cfg.avMinEdgeBps / 10_000;
-    const halfSpread = Math.max(minEdgeProb, av.halfSpread + extraSpreadProb / 2);
+    const halfSpread = Math.max(minEdgeProb, baseHalfSpreadProb, av.halfSpread + extraSpreadProb / 2);
 
     let yesBid = clampProb(av.reservationPrice - halfSpread);
     let yesAsk = clampProb(av.reservationPrice + halfSpread);
@@ -143,9 +143,9 @@ export class QuoteEngine {
     let yAskSize = clampSize(yesAskShares, this.cfg.minOrderSizeUsdc / (1 - yesAsk), this.cfg.maxOrderSizeUsdc / (1 - yesAsk));
 
     if (invSkew > 0.5) {
-      yBidSize = Math.floor(yBidSize * (1 - clamp01(invSkew)));
+      yBidSize = Math.floor(yBidSize * (1 - clamp01(invSkew * this.cfg.quoteSkewFactor)));
     } else if (invSkew < -0.5) {
-      yAskSize = Math.floor(yAskSize * (1 - clamp01(-invSkew)));
+      yAskSize = Math.floor(yAskSize * (1 - clamp01(-invSkew * this.cfg.quoteSkewFactor)));
     }
 
     // one-sided logic

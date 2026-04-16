@@ -1,9 +1,6 @@
 import { FeatureSnapshot, Regime, RegimeSnapshot } from '../types';
+import { BotConfig } from '../config';
 
-/**
- * Finite-state regime detector with hysteresis.
- * Harder to leave high-vol-trend than to enter it.
- */
 export class RegimeDetector {
   private current: Regime = 'low_vol_balanced';
   private candidate: Regime = 'low_vol_balanced';
@@ -11,6 +8,8 @@ export class RegimeDetector {
   private candidateSince = Date.now();
   private confidence = 0.5;
   private lastReason = 'init';
+
+  constructor(private readonly cfg?: BotConfig) {}
 
   snapshot(): RegimeSnapshot {
     const now = Date.now();
@@ -78,15 +77,16 @@ export class RegimeDetector {
   }
 
   private entryThreshold(from: Regime, to: Regime): number {
-    // if moving into high vol: faster; if moving to low vol from high: slower
-    if (to === 'high_vol_trend' || to === 'high_vol_chop') return 1500;
-    if (from === 'high_vol_trend') return 6000;
-    return 3000;
+    const s = this.cfg?.quoteRegimeSensitivity ?? 1.0;
+    if (to === 'high_vol_trend' || to === 'high_vol_chop') return Math.round(1500 / s);
+    if (from === 'high_vol_trend') return Math.round(6000 / s);
+    return Math.round(3000 / s);
   }
 
   private exitThreshold(regime: Regime): number {
-    if (regime === 'high_vol_trend') return 5000;
-    if (regime === 'high_vol_chop') return 3000;
-    return 1500;
+    const s = this.cfg?.quoteRegimeSensitivity ?? 1.0;
+    if (regime === 'high_vol_trend') return Math.round(5000 / s);
+    if (regime === 'high_vol_chop') return Math.round(3000 / s);
+    return Math.round(1500 / s);
   }
 }
