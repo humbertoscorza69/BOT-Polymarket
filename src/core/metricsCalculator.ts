@@ -141,7 +141,8 @@ export class MetricsCalculator {
       takerExecution,
       inventoryMetrics,
       pnlMetrics,
-      thresholds
+      thresholds,
+      totalTicks
     );
 
     return {
@@ -284,33 +285,41 @@ export class MetricsCalculator {
     takerExec: TakerExecutionMetrics,
     inventory: InventoryMetrics,
     pnl: PnlMetrics,
-    thresholds: KillThresholds
+    thresholds: KillThresholds,
+    totalTicks: number
   ): string | null {
-    if (spread.realizedSpreadBps < thresholds.spreadBpsMin) {
+    // Warmup guard: don't enforce fill-dependent thresholds until we have
+    // enough data to make meaningful measurements (minimum 5 fills).
+    const hasFills = this.fills.length >= 5;
+
+    if (hasFills && spread.realizedSpreadBps < thresholds.spreadBpsMin) {
       return `KILL: Realized spread ${spread.realizedSpreadBps} bps < minimum ${thresholds.spreadBpsMin} bps`;
     }
 
-    if (as.avgAdverseSelectionBps > thresholds.adverseSelectionBpsMax) {
+    if (hasFills && as.avgAdverseSelectionBps > thresholds.adverseSelectionBpsMax) {
       return `KILL: Adverse selection ${as.avgAdverseSelectionBps} bps > max ${thresholds.adverseSelectionBpsMax} bps`;
     }
 
-    if (fillQuality.fillRate < thresholds.fillRateMin) {
+    if (hasFills && fillQuality.fillRate < thresholds.fillRateMin) {
       return `KILL: Fill rate ${(fillQuality.fillRate * 100).toFixed(1)}% < minimum ${(thresholds.fillRateMin * 100).toFixed(1)}%`;
     }
 
-    if (fillQuality.fillRate > thresholds.fillRateMax) {
+    if (hasFills && fillQuality.fillRate > thresholds.fillRateMax) {
       return `KILL: Fill rate ${(fillQuality.fillRate * 100).toFixed(1)}% > maximum ${(thresholds.fillRateMax * 100).toFixed(1)}%`;
     }
 
-    if (takerExec.takerFillRate > thresholds.takerExecutionRateMax) {
+    if (hasFills && takerExec.takerFillRate > thresholds.takerExecutionRateMax) {
       return `KILL: Taker execution ${(takerExec.takerFillRate * 100).toFixed(1)}% > max ${(thresholds.takerExecutionRateMax * 100).toFixed(1)}%`;
     }
 
-    if (takerExec.stalePriceTriggerRate > thresholds.staleNoQuoteRateMax) {
+    // Stale trigger rate needs warmup: sparse WS feeds inflate this during
+    // early minutes. Require at least 600 ticks (~5min at 500ms tick).
+    const hasEnoughTicks = totalTicks >= 600;
+    if (hasEnoughTicks && takerExec.stalePriceTriggerRate > thresholds.staleNoQuoteRateMax) {
       return `KILL: Stale price triggers ${(takerExec.stalePriceTriggerRate * 100).toFixed(1)}% > max ${(thresholds.staleNoQuoteRateMax * 100).toFixed(1)}%`;
     }
 
-    if (pnl.netRealizedPnlBps < thresholds.pnlNetMin) {
+    if (hasFills && pnl.netRealizedPnlBps < thresholds.pnlNetMin) {
       return `KILL: Net PnL ${pnl.netRealizedPnlBps} bps < minimum ${thresholds.pnlNetMin} bps`;
     }
 

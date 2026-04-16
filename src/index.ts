@@ -46,6 +46,7 @@ async function main(): Promise<void> {
   const rootLogger = initRootLogger(cfg.logLevel, `${cfg.logsDir}/${cfg.runId}.log`);
   const log = getLogger('main');
 
+  log.info('[BOOT] process started', { pid: process.pid, nodeVersion: process.version });
   log.info('╔══════════════════════════════════════════════════════╗');
   log.info('║   POLYMARKET MARKET MAKER BOT  —  STARTUP            ║');
   log.info('╚══════════════════════════════════════════════════════╝');
@@ -189,6 +190,7 @@ async function main(): Promise<void> {
   });
 
   // Start services
+  log.info('[BOOT] starting services');
   dashboard.start();
   adverse.start(() => (lastPoly?.midYes ?? null));
   paper.start();
@@ -203,6 +205,7 @@ async function main(): Promise<void> {
   }
 
   if (cfg.dataSource === 'real') {
+    log.info('[BOOT] starting real feeds (discovery + poly + binance)');
     await discovery.start();
     polyFeed.start();
     binanceFeed.start();
@@ -443,10 +446,15 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => { shutdown('SIGINT').catch((e) => console.error('shutdown error', e)); });
   process.on('SIGTERM', () => { shutdown('SIGTERM').catch((e) => console.error('shutdown error', e)); });
   process.on('uncaughtException', (e) => {
+    console.error('[FATAL] uncaughtException:', e);
     log.error('uncaughtException', { err: String(e), stack: e.stack });
   });
   process.on('unhandledRejection', (e) => {
+    console.error('[FATAL] unhandledRejection:', e);
     log.error('unhandledRejection', { err: String(e) });
+  });
+  process.on('exit', (code) => {
+    console.error(`[EXIT] code=${code} uptime=${process.uptime().toFixed(1)}s`);
   });
 }
 
