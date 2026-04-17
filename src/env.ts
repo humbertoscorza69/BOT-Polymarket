@@ -124,6 +124,13 @@ export interface EnvConfig {
 
   tickMs: number;
 
+  /** How often the live fill detector polls open orders (ms). */
+  fillDetectorPollMs: number;
+  /** Minimum edge in bps required for BUY YES + BUY NO pair (price sum < 1 - edge). */
+  minPairEdgeBps: number;
+  /** Exchange tick size for price rounding (Polymarket default: 0.01). */
+  tickSize: number;
+
   polyPrivateKey: string;
   polyFunderAddress: string;
   polyApiKey: string;
@@ -240,6 +247,10 @@ export function loadEnv(): EnvConfig {
     cancelVelocityAloneBpsTrigger: num(e.CANCEL_VELOCITY_ALONE_BPS_TRIGGER, 25),
 
     tickMs: num(e.TICK_MS, 500),
+
+    fillDetectorPollMs: num(e.FILL_DETECTOR_POLL_MS, 3000),
+    minPairEdgeBps: num(e.MIN_PAIR_EDGE_BPS, 200),
+    tickSize: num(e.TICK_SIZE, 0.01),
 
     polyPrivateKey: str(e.POLY_PRIVATE_KEY, ''),
     polyFunderAddress: str(e.POLY_FUNDER_ADDRESS, ''),

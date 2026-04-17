@@ -21,6 +21,7 @@ import { TelemetryHub } from './core/telemetry';
 import { MetricsCalculator, DEFAULT_KILL_THRESHOLDS, PaperTradingMetrics } from './core/metricsCalculator';
 import { MetricsExporter } from './core/metricsExporter';
 import { KillThresholdMonitor } from './core/killThresholdMonitor';
+import { LatencyTracker } from './core/latencyTracker';
 import { CancelCoordinator } from './execution/cancelCoordinator';
 import { InventoryEngine } from './execution/inventoryEngine';
 import { OrderManager } from './execution/orderManager';
@@ -103,6 +104,9 @@ async function main(): Promise<void> {
     pnlNetMinUsdc: cfg.killPnlNetMin,
   };
   const killMonitor = new KillThresholdMonitor(killThresholds);
+  const latency = new LatencyTracker();
+  // POL-35-I: wire ClobDriver latency into the tracker once the driver exists.
+  // Set after ClobDriver is constructed below.
   const metricsHistory: PaperTradingMetrics[] = [];
   const sessionStartTime = cfg.startTs;
 
@@ -150,8 +154,11 @@ async function main(): Promise<void> {
   cancelCoord.setPolyMidGetter(() => lastPoly?.midYes ?? null);
   const paper = new PaperTrader(cfg);
   const clob = new ClobDriver(cfg);
+  clob.onLatency = (stage, ms) => latency.record(stage, ms); // POL-35-I
   const reconciler = new Reconciler(cfg, clob, inventory);
   const liveExec = new LiveExecutor(cfg, clob, reconciler, inventory);
+  // Forward reference so onBeforeCancel can reach the detector once it's built below.
+  let liveFillDetectorRef: LiveFillDetector | null = null;
   const orderManager = new OrderManager({
     mode: cfg.mode,
     cfg,
@@ -159,14 +166,23 @@ async function main(): Promise<void> {
     clob,
     inventory,
     getPolySnapshot: () => lastPoly,
+    onBeforeCancel: (exchangeOrderId: string) => {
+      if (liveFillDetectorRef) liveFillDetectorRef.notifyCancelled(exchangeOrderId);
+    },
   });
   const fills = new FillTracker();
 
-  // POL-39 Fix A: Live fill detection — polls exchange, detects fills by order disappearance
+  // POL-39 Fix A / POL-35 VERIFY-1: Live fill detection — polls exchange, detects
+  // fills by order disappearance. Poll interval configurable via FILL_DETECTOR_POLL_MS.
   const liveFillDetector = cfg.mode === 'live' ? new LiveFillDetector({
     clob,
-    pollMs: 5000,
+    pollMs: cfg.fillDetectorPollMs,
     getActiveOrders: () => orderManager.getActive(),
+    onMultiMarket: (markets: string[]) => {
+      log.error(`${cycleTag()} [MULTI-MARKET] emergency cancel-all — orders span ${markets.length} markets`, { markets: markets.slice(0, 8) });
+      orderManager.cancelAll('multi_market_violation').catch((e) => log.warn('multi-market cancelAll failed', { err: String(e) }));
+      risk.forceState('HALTED', `multi-market: ${markets.length} markets`);
+    },
     getContext: () => {
       if (!currentMarket) return null;
       const asset = detectPrimaryAsset(currentMarket, cfg.targetAssets) || cfg.targetAssets[0];
@@ -185,6 +201,7 @@ async function main(): Promise<void> {
 
   // Wire live fill detector into the fill pipeline
   if (liveFillDetector) {
+    liveFillDetectorRef = liveFillDetector; // Forward ref for onBeforeCancel closure above.
     liveFillDetector.on('fill', (fill: Fill, order: ActiveOrder) => {
       // Remove the filled order from OrderManager's active map
       orderManager.removeActive(order.quoteId);
@@ -192,7 +209,9 @@ async function main(): Promise<void> {
       orderManager.emit('fill', fill, order);
     });
 
-    // Track cancels so the detector doesn't false-detect them as fills
+    // Belt-and-suspenders: also mark cancelled on the 'cancelled' event.
+    // Primary close happens in onBeforeCancel (set pre-API). This handles any
+    // cancellation path that doesn't go through OrderManager.cancel().
     orderManager.on('cancelled', (order: ActiveOrder) => {
       if (order.exchangeOrderId) {
         liveFillDetector.notifyCancelled(order.exchangeOrderId);
@@ -225,12 +244,16 @@ async function main(): Promise<void> {
   let currentMarket: PolymarketMarket | null = null;
 
   const onPoly = (p: PolySnapshot): void => {
+    const t0 = Date.now();
     lastPoly = p;
     paper.onPoly(p);
     inventory.markToMarket(p.midYes);
+    latency.record('feedPoly', Date.now() - t0);
   };
   const onBin = (b: BinanceSnapshot): void => {
+    const t0 = Date.now();
     lastBin = b;
+    latency.record('feedBin', Date.now() - t0);
   };
 
   if (cfg.dataSource === 'sim') {
@@ -255,6 +278,7 @@ async function main(): Promise<void> {
     }
     orderManager.setMarket(market);
     reconciler.setConditionId(market.conditionId);
+    lastFlattenTs = 0; // POL-35 VERIFY-7: new market, reset flatten rate-limit
   });
 
   // Fill processing pipeline
@@ -301,6 +325,7 @@ async function main(): Promise<void> {
   // Start services
   log.info('[BOOT] starting services');
   dashboard.start();
+  latency.startLogging(60_000); // POL-35-I: periodic latency summary
   adverse.start(() => (lastPoly?.midYes ?? null));
   // 2A: Post-fill AS decomposition logging
   adverse.on('sample', (sample: AdverseSelectionSample) => {
@@ -378,6 +403,7 @@ async function main(): Promise<void> {
   let lastExpiryTs = 0; // tracks the expiry of the last cycle we saw
   let lastQuoteRefreshTs = 0; // 2B: timestamp of last quote refresh
   let binMidAtLastRefresh = 0; // 2A: Binance mid at last quote refresh
+  let lastFlattenTs = 0; // POL-35 VERIFY-7: rate-limit flatten attempts
   let completedCycles5m = 0;
   let completedCycles15m = 0;
 
@@ -476,56 +502,74 @@ async function main(): Promise<void> {
 
       const params = paramsStore.get();
 
-      // Pre-expiry quiet period: cancel quotes and stop placing new ones near expiry
+      // POL-35 VERIFY-7: staged pre-expiry flatten. Aggression escalates as
+      // window end approaches, so positions don't ride through resolution.
+      //   T-60s to T-30s: defensive — cancel BUYs, passive SELL at ask
+      //   T-30s to T-15s: aggressive — cross spread, sell at bid (taker)
+      //   T-15s to T-5s:  emergency — fire sale at $0.01
+      //   T-5s to T-0s:   cancel everything, accept residual
       const ttlSecs = secsToExpiry();
-      let quietMode: 'none' | 'flatten' | 'no_orders' = 'none';
-      if (ttlSecs <= 15) {
-        quietMode = 'no_orders';
-      } else if (ttlSecs <= 30) {
-        quietMode = 'flatten';
+      let quietMode: 'none' | 'defensive' | 'aggressive' | 'emergency' | 'no_orders' = 'none';
+      if (ttlSecs <= 5) quietMode = 'no_orders';
+      else if (ttlSecs <= 15) quietMode = 'emergency';
+      else if (ttlSecs <= 30) quietMode = 'aggressive';
+      else if (ttlSecs <= 60) quietMode = 'defensive';
+
+      const hasInventory = inventory.state.yesPosition > 0 || inventory.state.noPosition > 0;
+
+      // Rate-limit flatten attempts to once per ~2 seconds per stage.
+      if (quietMode !== 'none' && quietMode !== 'no_orders' && hasInventory) {
+        const elapsed = Date.now() - lastFlattenTs;
+        if (elapsed > 2000) {
+          lastFlattenTs = Date.now(); // mark immediately so concurrent ticks skip
+          const stage = quietMode;
+          // Cancel stale maker quotes, then place aggressive exit orders.
+          (async () => {
+            try {
+              await orderManager.cancelAll(`flatten_${stage}`);
+              await orderManager.flatten(stage);
+            } catch (e) {
+              log.warn('flatten error', { err: String(e) });
+            }
+          })();
+        }
       }
 
       if (quietMode !== 'none' && tickCount % 10 === 1) {
-        log.info(`${cycleTag()} [QUIET] contract ${currentMarket?.slug ?? '?'} T-${Math.round(ttlSecs)}s — ${quietMode === 'flatten' ? 'cancelling quotes, attempting flatten' : 'no orders, waiting for expiry'}`, {
-          residualInventory: inventory.state.yesPosition,
+        log.info(`${cycleTag()} [QUIET] contract ${currentMarket?.slug ?? '?'} T-${Math.round(ttlSecs)}s — ${quietMode}`, {
+          yesPos: inventory.state.yesPosition.toFixed(2),
+          noPos: inventory.state.noPosition.toFixed(2),
         });
       }
 
       let quote;
       if (quietMode === 'no_orders') {
-        // T-15 to T-0: no orders at all. Cancel everything.
+        // T-5 to T-0: cancel everything, accept residual.
         orderManager.cancelAll('quiet_period_no_orders').catch((e) => log.warn('quiet cancelAll error', { err: String(e) }));
+        if (hasInventory) {
+          log.error(`${cycleTag()} [RESOLUTION-RISK] ${inventory.state.yesPosition.toFixed(2)} YES / ${inventory.state.noPosition.toFixed(2)} NO held into resolution`);
+        }
+        const qt0 = Date.now();
         quote = quoteEngine.quote({
-          features,
-          regime: regSnap,
-          health: healthSnap,
-          inventory: inventory.state,
-          riskState,
-          params,
-          preemptiveCancelActive: true, // force blocked
+          features, regime: regSnap, health: healthSnap, inventory: inventory.state,
+          riskState, params, preemptiveCancelActive: true,
         });
-      } else if (quietMode === 'flatten') {
-        // T-30 to T-15: cancel normal quotes, attempt flatten
-        orderManager.cancelAll('quiet_period_flatten').catch((e) => log.warn('quiet cancelAll error', { err: String(e) }));
+        latency.record('quote', Date.now() - qt0);
+      } else if (quietMode !== 'none') {
+        // T-60 to T-5: flatten is handling the exit. Block new maker quotes.
+        const qt0 = Date.now();
         quote = quoteEngine.quote({
-          features,
-          regime: regSnap,
-          health: healthSnap,
-          inventory: inventory.state,
-          riskState,
-          params,
-          preemptiveCancelActive: true, // force blocked
+          features, regime: regSnap, health: healthSnap, inventory: inventory.state,
+          riskState, params, preemptiveCancelActive: true,
         });
+        latency.record('quote', Date.now() - qt0);
       } else {
+        const qt0 = Date.now();
         quote = quoteEngine.quote({
-          features,
-          regime: regSnap,
-          health: healthSnap,
-          inventory: inventory.state,
-          riskState,
-          params,
-          preemptiveCancelActive: cancelCoord.isActive(),
+          features, regime: regSnap, health: healthSnap, inventory: inventory.state,
+          riskState, params, preemptiveCancelActive: cancelCoord.isActive(),
         });
+        latency.record('quote', Date.now() - qt0);
       }
 
       if (tickCount % 20 === 1) {
@@ -584,6 +628,7 @@ async function main(): Promise<void> {
           binStale: lastBin?.stale ?? false,
         },
         latencyArb: cancelCoord.snapshot(),
+        latencyStats: latency.snapshot(),
         autohealChanges: autoheal.recentChanges(),
         live: {
           enabled: cfg.liveApiEnabled && cfg.mode === 'live',
@@ -662,6 +707,7 @@ async function main(): Promise<void> {
     clearInterval(tickTimer);
     clearInterval(keepaliveTimer);
     if (liveFillDetector) liveFillDetector.stop();
+    latency.stopLogging();
     autoheal.stop();
     adverse.stop();
     paper.stop();

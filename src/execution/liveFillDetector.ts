@@ -19,6 +19,9 @@ export interface LiveFillDetectorOpts {
     mid: number;
     runId: string;
   } | null;
+  /** POL-35 VERIFY-10: invoked when the poll sees open orders spanning
+   *  more than one market. Caller should cancel-all and halt. */
+  onMultiMarket?: (markets: string[]) => void;
 }
 
 /**
@@ -71,9 +74,21 @@ export class LiveFillDetector extends EventEmitter {
 
       const exchangeOrders = await this.opts.clob.fetchOpenOrders();
       const exchangeIds = new Set<string>();
+      const marketIds = new Set<string>();
       for (const eo of exchangeOrders) {
         const id = String(eo.id ?? eo.orderID ?? eo.order_id ?? '');
         if (id) exchangeIds.add(id);
+        // POL-35 VERIFY-10: track which markets/condition IDs have live orders.
+        const mid = String(eo.market ?? eo.conditionId ?? eo.condition_id ?? eo.asset_id ?? '');
+        if (mid) marketIds.add(mid);
+      }
+
+      // Multi-market detector: orders should only exist for the active market.
+      // We accept up to 2 distinct IDs (YES+NO token IDs for one market). If
+      // the IDs correspond to more than one conditionId, call the handler.
+      if (marketIds.size > 2 && this.opts.onMultiMarket) {
+        log.error('[MULTI-MARKET] orders span multiple markets', { markets: [...marketIds].slice(0, 8), count: marketIds.size });
+        this.opts.onMultiMarket([...marketIds]);
       }
 
       this.pollCount++;

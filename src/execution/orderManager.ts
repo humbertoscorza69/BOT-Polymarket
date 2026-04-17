@@ -22,6 +22,10 @@ export interface OrderManagerOpts {
   clob?: ClobDriver;
   inventory?: InventoryEngine;
   getPolySnapshot?: () => import('../types').PolySnapshot | null;
+  /** Invoked with exchangeOrderId BEFORE the cancel API request is sent,
+   *  so the fill detector doesn't mis-classify a cancel as a fill
+   *  between the API call and the 'cancelled' event emission. */
+  onBeforeCancel?: (exchangeOrderId: string) => void;
 }
 
 /**
@@ -114,6 +118,52 @@ export class OrderManager extends EventEmitter {
       want.push({ side: 'SELL', token: 'NO', price: q.noAsk, sizeShares: q.noAskSize, tokenId: this.market.noTokenId });
     }
 
+    // POL-35-L: Pair-edge validation. When placing BUY YES and BUY NO
+    // simultaneously (directly, or via SELL→BUY-NO conversion from zero
+    // inventory), the two prices MUST sum to strictly less than $1 — the
+    // difference is our maker edge. Without this check, the bot can end
+    // up paying $1.12 for a $1.00 resolution (guaranteed loss).
+    const buyYesPrice = want.find((w) => w.side === 'BUY' && w.token === 'YES')?.price;
+    const directBuyNoPrice = want.find((w) => w.side === 'BUY' && w.token === 'NO')?.price;
+    const sellYesForConversion = want.find((w) => w.side === 'SELL' && w.token === 'YES');
+    const inv = this.opts.inventory?.state;
+    // SELL YES converts to BUY NO @ (1 - sellPrice) when yesPosition <= 0
+    const effectiveBuyNo =
+      directBuyNoPrice ??
+      (sellYesForConversion && (!inv || inv.yesPosition <= 0)
+        ? 1 - sellYesForConversion.price
+        : undefined);
+
+    if (buyYesPrice !== undefined && effectiveBuyNo !== undefined) {
+      const pairSum = buyYesPrice + effectiveBuyNo;
+      const pairEdgeBps = (1 - pairSum) * 10_000;
+      const minEdgeBps = this.opts.cfg.minPairEdgeBps;
+      if (pairEdgeBps < minEdgeBps) {
+        log.error('[PAIR-CHECK] insufficient edge — skipping paired BUY YES + BUY NO', {
+          yesBuy: buyYesPrice.toFixed(4),
+          noBuy: effectiveBuyNo.toFixed(4),
+          pairSum: pairSum.toFixed(4),
+          edgeBps: pairEdgeBps.toFixed(0),
+          minBps: minEdgeBps,
+        });
+        // Cancel any existing orders on either BUY side so we don't get stuck
+        // with stale quotes at the bad pair prices. SELL YES conversion also
+        // dropped. Existing SELL YES (when inv>0, no conversion) keeps.
+        for (const o of this.active.values()) {
+          const isBuyPair = o.side === 'BUY' && (o.token === 'YES' || o.token === 'NO');
+          const isConvertingSellYes = o.side === 'SELL' && o.token === 'YES' && (!inv || inv.yesPosition <= 0);
+          if (isBuyPair || isConvertingSellYes) {
+            await this.cancel(o.quoteId, 'pair_edge_insufficient');
+          }
+        }
+        return;
+      }
+      log.debug('[PAIR-CHECK] edge ok', {
+        pairSum: pairSum.toFixed(4),
+        edgeBps: pairEdgeBps.toFixed(0),
+      });
+    }
+
     // match existing orders by (token, side); either keep, replace, or cancel
     const existingBySide = new Map<string, ActiveOrder>();
     for (const o of this.active.values()) {
@@ -150,9 +200,24 @@ export class OrderManager extends EventEmitter {
     price: number;
     sizeShares: number;
     tokenId: string;
+    bypassPostOnly?: boolean;
+    bypassInventoryCap?: boolean;
+    bypassSellConversion?: boolean;
   }): Promise<void> {
+    // POL-35 VERIFY-3: safety net — refuse orders on markets whose window
+    // hasn't started yet. Primary filter is in discovery, this catches any
+    // edge case where a future-window market sneaks through.
+    if (this.market?.windowStartTs !== undefined && this.market.windowStartTs * 1000 > Date.now()) {
+      const waitSec = this.market.windowStartTs - Math.floor(Date.now() / 1000);
+      log.error('[ORDER-BLOCKED] refusing order on future market', {
+        slug: this.market.slug,
+        windowStartsInSec: waitSec,
+      });
+      return;
+    }
+
     // B1: Pre-trade inventory cap check (USDC notional + per-side share cap)
-    if (this.opts.inventory && w.side === 'BUY') {
+    if (this.opts.inventory && w.side === 'BUY' && !w.bypassInventoryCap) {
       const sizeUsdc = w.price * w.sizeShares;
       if (!this.opts.inventory.canAccumulate(w.token, sizeUsdc, w.sizeShares)) {
         log.warn('[INVENTORY] blocked order — would exceed cap', { side: w.side, token: w.token, sizeUsdc: sizeUsdc.toFixed(2), sizeShares: w.sizeShares });
@@ -162,7 +227,7 @@ export class OrderManager extends EventEmitter {
 
     // SELL gate: convert SELL to BUY-opposite when no position (synthetic sell),
     // or clamp SELL size to current position.
-    if (this.opts.inventory && w.side === 'SELL') {
+    if (this.opts.inventory && w.side === 'SELL' && !w.bypassSellConversion) {
       const pos = w.token === 'YES'
         ? this.opts.inventory.state.yesPosition
         : this.opts.inventory.state.noPosition;
@@ -195,8 +260,34 @@ export class OrderManager extends EventEmitter {
       }
     }
 
-    // H3: Post-only guard — prevent crossing the book
-    if (this.opts.getPolySnapshot) {
+    // POL-35-K: Tick-size rounding. Polymarket binary markets tick at $0.01
+    // by default. Fractional penny prices like 0.56532 indicate a client bug
+    // and produce taker-style fills at weird prices. Round direction:
+    //   - Maker BUY: floor to tick (stays below ask → maker)
+    //   - Maker SELL: ceil to tick (stays above bid → maker)
+    //   - Taker / flatten (bypassPostOnly): reverse (toward the market)
+    const tick = this.opts.cfg.tickSize;
+    if (tick > 0) {
+      const roundFloor = (p: number): number => Math.floor(p / tick) * tick;
+      const roundCeil = (p: number): number => Math.ceil(p / tick) * tick;
+      const roundNearest = (p: number): number => Math.round(p / tick) * tick;
+      if (w.bypassPostOnly) {
+        // Flatten: accept small rounding either way — nearest tick.
+        w.price = roundNearest(w.price);
+      } else if (w.side === 'BUY') {
+        w.price = roundFloor(w.price);
+      } else {
+        w.price = roundCeil(w.price);
+      }
+      // Clamp to [tick, 1-tick] to avoid edge-case 0 or 1 prices.
+      w.price = Math.max(tick, Math.min(1 - tick, w.price));
+      // Fix JS floating point: snap to 4 decimals (covers 0.001 ticks too).
+      w.price = Math.round(w.price * 10_000) / 10_000;
+    }
+
+    // H3: Post-only guard — prevent crossing the book (bypassed on flatten
+    // since flatten's whole purpose is to aggressively exit).
+    if (this.opts.getPolySnapshot && !w.bypassPostOnly) {
       const snap = this.opts.getPolySnapshot();
       if (snap) {
         const book = w.token === 'YES' ? snap.yesBook : snap.noBook;
@@ -265,7 +356,13 @@ export class OrderManager extends EventEmitter {
       if (this.opts.mode === 'paper' || this.opts.mode === 'dry_run') {
         if (this.opts.paper) this.opts.paper.cancel(quoteId);
       } else if (this.opts.mode === 'live') {
-        if (this.opts.clob && o.exchangeOrderId) await this.opts.clob.cancelOrder(o.exchangeOrderId);
+        // POL-35 VERIFY-1: mark cancelling BEFORE the API call to close the
+        // race window where the fill detector poll could see the order
+        // removed and mis-identify it as a fill.
+        if (this.opts.clob && o.exchangeOrderId) {
+          if (this.opts.onBeforeCancel) this.opts.onBeforeCancel(o.exchangeOrderId);
+          await this.opts.clob.cancelOrder(o.exchangeOrderId);
+        }
       }
       this.active.delete(quoteId);
       this.emit('cancelled', o, reason);
@@ -295,5 +392,65 @@ export class OrderManager extends EventEmitter {
     } finally {
       this.cancelling = false;
     }
+  }
+
+  /**
+   * POL-35 VERIFY-7: aggressive pre-expiry flatten.
+   * Stage controls price aggression:
+   *   defensive  — sell YES at best-ask / NO at best-ask (passive, stay maker)
+   *   aggressive — sell YES at best-bid / NO at best-bid (cross spread = taker)
+   *   emergency  — sell at $0.01 (fire sale, any price above zero)
+   * Bypasses post-only, inventory-cap, and SELL→BUY-opposite conversion.
+   * Caller should rate-limit invocations; we place at most one order per
+   * non-zero position per call.
+   */
+  async flatten(stage: 'defensive' | 'aggressive' | 'emergency'): Promise<number> {
+    if (!this.market || !this.opts.inventory) return 0;
+    const inv = this.opts.inventory.state;
+    const snap = this.opts.getPolySnapshot?.() ?? null;
+
+    const pickPrice = (token: 'YES' | 'NO'): number => {
+      if (stage === 'emergency') return 0.01;
+      const book = snap ? (token === 'YES' ? snap.yesBook : snap.noBook) : null;
+      if (stage === 'aggressive') {
+        // Cross the spread: sell at BID price (taker).
+        return book?.bids[0]?.price ?? 0.01;
+      }
+      // Defensive: stay passive at ASK price (maker, hope for fill).
+      return book?.asks[0]?.price ?? 0.99;
+    };
+
+    let placed = 0;
+    if (inv.yesPosition > 0) {
+      const price = pickPrice('YES');
+      log.warn('[FLATTEN]', { stage, token: 'YES', price: price.toFixed(4), shares: inv.yesPosition.toFixed(2) });
+      await this.place({
+        side: 'SELL',
+        token: 'YES',
+        price,
+        sizeShares: inv.yesPosition,
+        tokenId: this.market.yesTokenId,
+        bypassPostOnly: stage !== 'defensive',
+        bypassInventoryCap: true,
+        bypassSellConversion: true,
+      });
+      placed += 1;
+    }
+    if (inv.noPosition > 0) {
+      const price = pickPrice('NO');
+      log.warn('[FLATTEN]', { stage, token: 'NO', price: price.toFixed(4), shares: inv.noPosition.toFixed(2) });
+      await this.place({
+        side: 'SELL',
+        token: 'NO',
+        price,
+        sizeShares: inv.noPosition,
+        tokenId: this.market.noTokenId,
+        bypassPostOnly: stage !== 'defensive',
+        bypassInventoryCap: true,
+        bypassSellConversion: true,
+      });
+      placed += 1;
+    }
+    return placed;
   }
 }

@@ -54,6 +54,8 @@ export interface TelemetrySnapshot {
     recentCancels: Array<{ ts: number; reason: string }>;
     totalCancels: number;
   };
+  /** POL-35-I: per-stage latency averages/p95/max. */
+  latencyStats: Record<string, { avg: number; p95: number; max: number; count: number }>;
   autohealChanges: Array<{ ts: number; note: string }>;
   live: {
     enabled: boolean;

@@ -38,6 +38,9 @@ export interface PolymarketMarket {
   noTokenId: string;
   // epoch seconds
   endDateTs: number;
+  /** Window start time in epoch seconds. Derived from slug when present,
+   *  used to reject future-window markets that haven't started yet. */
+  windowStartTs?: number;
   active: boolean;
   closed: boolean;
   // numeric proxy for liquidity; may be missing
