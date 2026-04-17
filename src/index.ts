@@ -34,6 +34,7 @@ import { SessionStore } from './persistence/sessionStore';
 import { SnapshotStore } from './persistence/snapshotStore';
 import { ParamsStore, defaultAdaptiveParams } from './persistence/paramsStore';
 import {
+  AdverseSelectionSample,
   BinanceSnapshot,
   Fill,
   PolymarketMarket,
@@ -107,7 +108,9 @@ async function main(): Promise<void> {
     velocityBpsTrigger: cfg.cancelVelocityBpsTrigger,
     aggressorTrigger: cfg.cancelAggressorTrigger,
     freezeMs: cfg.cancelFreezeMs,
+    velocityAloneBpsTrigger: cfg.cancelVelocityAloneBpsTrigger,
   });
+  cancelCoord.setPolyMidGetter(() => lastPoly?.midYes ?? null);
   const paper = new PaperTrader(cfg);
   const clob = new ClobDriver(cfg);
   const reconciler = new Reconciler(cfg, clob, inventory);
@@ -196,6 +199,17 @@ async function main(): Promise<void> {
       regime: fill.regime,
       pnl: pnl.state().net?.toFixed(2),
     });
+    // 2A: AS decomposition logging
+    const binMidAtFill = lastBin?.mid ?? 0;
+    const polyMidAtFill = lastPoly?.midYes ?? 0;
+    const quoteAgeMs = lastQuoteRefreshTs > 0 ? Date.now() - lastQuoteRefreshTs : 0;
+    log.info(`[AS-DECOMP] fill=${fill.id} side=${fill.side} fillPrice=${fill.price?.toFixed(4)} binMidAtLastRefresh=${binMidAtLastRefresh.toFixed(2)} binMidAtFill=${binMidAtFill.toFixed(2)} polyMidAtFill=${polyMidAtFill.toFixed(4)} quoteAgeMs=${quoteAgeMs} regime=${fill.regime} asset=${fill.asset} interval=${fill.interval}`);
+    // 2B: Quote age tracking
+    log.info(`[QUOTE-AGE] fill=${fill.id} quoteAgeMs=${quoteAgeMs}`);
+    // 2A: Schedule post-fill decomposition (1s and 5s samples are handled by AdverseSelectionDetector,
+    // but we log the pre-fill staleness here for decomposition)
+    const preFillStaleness = Math.abs(binMidAtFill - binMidAtLastRefresh);
+    log.info(`[AS-DECOMP-PRE] fill=${fill.id} preFillStalenessBps=${(preFillStaleness / binMidAtFill * 10000).toFixed(1)}`);
   });
 
   // Track orders placed for fill rate metric
@@ -213,6 +227,10 @@ async function main(): Promise<void> {
   log.info('[BOOT] starting services');
   dashboard.start();
   adverse.start(() => (lastPoly?.midYes ?? null));
+  // 2A: Post-fill AS decomposition logging
+  adverse.on('sample', (sample: AdverseSelectionSample) => {
+    log.info(`[AS-DECOMP-POST] fill=${sample.fillId} polyMid1s=${sample.mid1sLater?.toFixed(4) ?? 'null'} polyMid5s=${sample.mid5sLater?.toFixed(4) ?? 'null'} fairAtFill=${sample.fairAtFill.toFixed(4)} postFill1sMove=${sample.mid1sLater !== null ? ((sample.mid1sLater - sample.fairAtFill) * 10000).toFixed(1) : 'null'}bps postFill5sMove=${sample.mid5sLater !== null ? ((sample.mid5sLater - sample.fairAtFill) * 10000).toFixed(1) : 'null'}bps score=${sample.score.toFixed(3)} regime=${sample.regime} asset=${sample.asset}`);
+  });
   paper.start();
   autoheal.start();
 
@@ -261,6 +279,8 @@ async function main(): Promise<void> {
 
   let tickCount = 0;
   let lastExpiryTs = 0; // tracks the expiry of the last cycle we saw
+  let lastQuoteRefreshTs = 0; // 2B: timestamp of last quote refresh
+  let binMidAtLastRefresh = 0; // 2A: Binance mid at last quote refresh
   let completedCycles5m = 0;
   let completedCycles15m = 0;
 
@@ -430,6 +450,8 @@ async function main(): Promise<void> {
       // Apply quote to order manager (paper or live) — skip during quiet period and warmup
       if (!inWarmup && quietMode === 'none' && (cfg.mode !== 'live' || liveExec.isReady())) {
         orderManager.applyQuote(quote).catch((e) => log.warn('applyQuote error', { err: String(e) }));
+        lastQuoteRefreshTs = Date.now();
+        binMidAtLastRefresh = lastBin?.mid ?? 0;
       }
 
       telemetry.updatePartial({

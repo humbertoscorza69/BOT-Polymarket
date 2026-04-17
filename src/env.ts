@@ -120,6 +120,7 @@ export interface EnvConfig {
   cancelVelocityBpsTrigger: number;
   cancelAggressorTrigger: number;
   cancelFreezeMs: number;
+  cancelVelocityAloneBpsTrigger: number;
 
   tickMs: number;
 
@@ -236,6 +237,7 @@ export function loadEnv(): EnvConfig {
     cancelVelocityBpsTrigger: num(e.CANCEL_VELOCITY_BPS_TRIGGER, 12),
     cancelAggressorTrigger: num(e.CANCEL_AGGRESSOR_TRIGGER, 0.55),
     cancelFreezeMs: num(e.CANCEL_FREEZE_MS, 1200),
+    cancelVelocityAloneBpsTrigger: num(e.CANCEL_VELOCITY_ALONE_BPS_TRIGGER, 25),
 
     tickMs: num(e.TICK_MS, 500),
 

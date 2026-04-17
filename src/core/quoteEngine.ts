@@ -59,6 +59,9 @@ export class QuoteEngine {
     if (preemptiveCancelActive) {
       return blocked('preemptive_cancel_active');
     }
+    if (regime.current === 'high_vol_trend') {
+      return blocked('trending_regime');
+    }
     if (health.state === 'UNSAFE') {
       return blocked(`health:${health.state}`);
     }

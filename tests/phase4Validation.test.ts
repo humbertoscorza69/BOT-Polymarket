@@ -180,11 +180,12 @@ describe('Phase 4 Validation', () => {
     });
 
     it('CancelCoordinator fires on velocity spike', () => {
-      const cc = new CancelCoordinator({ velocityBpsTrigger: 12, aggressorTrigger: 0.55, freezeMs: 1200 });
+      const cc = new CancelCoordinator({ velocityBpsTrigger: 12, aggressorTrigger: 0.55, freezeMs: 1200, velocityAloneBpsTrigger: 25 });
       let cancelFired = false;
       cc.on('cancelAll', () => { cancelFired = true; });
+      // velocity-alone trigger: 30 > 25 threshold, no aggressor needed
       cc.feed(
-        { symbol: 'BTCUSDT', bestBid: 50000, bestAsk: 50001, mid: 50000.5, bookImbalance: 0, aggressorRatio: 0, priceVelocityBps: 15, volumeRatio: 1, bidWall: null, askWall: null, lastTradeTs: Date.now(), feedAgeMs: 100, stale: false, available: true },
+        { symbol: 'BTCUSDT', bestBid: 50000, bestAsk: 50001, mid: 50000.5, bookImbalance: 0, aggressorRatio: 0, priceVelocityBps: 30, volumeRatio: 1, bidWall: null, askWall: null, lastTradeTs: Date.now(), feedAgeMs: 100, stale: false, available: true },
         mkFeat(),
       );
       expect(cancelFired).toBe(true);
