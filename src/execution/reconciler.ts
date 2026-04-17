@@ -12,6 +12,7 @@ export interface ReconcileReport {
   usdc: number;
   openOrderCount: number;
   drift: boolean;
+  shareDrift: boolean;
   lastRun: number;
 }
 
@@ -21,15 +22,21 @@ export class Reconciler {
     usdc: 0,
     openOrderCount: 0,
     drift: false,
+    shareDrift: false,
     lastRun: 0,
   };
   private timer: NodeJS.Timeout | null = null;
+  private currentConditionId: string | null = null;
 
   constructor(
     private readonly cfg: BotConfig,
     private readonly clob: ClobDriver,
     private readonly inventory: InventoryEngine,
   ) {}
+
+  setConditionId(conditionId: string | null): void {
+    this.currentConditionId = conditionId;
+  }
 
   startPeriodic(intervalMs = 120_000): void {
     if (this.timer) clearInterval(this.timer);
@@ -54,26 +61,61 @@ export class Reconciler {
         usdc: this.inventory.state.freeUsdc,
         openOrderCount: 0,
         drift: false,
+        shareDrift: false,
         lastRun: Date.now(),
       };
       return this.last;
     }
     try {
       const [bal, open] = await Promise.all([this.clob.fetchBalance(), this.clob.fetchOpenOrders()]);
-      // Simple drift check: free USDC mismatch beyond tolerance
-      const drift = Math.abs(bal.usdc - this.inventory.state.freeUsdc) > Math.max(5, this.cfg.bankrollUsdc * 0.2);
+      // M2: Tightened drift threshold
+      const driftThreshold = Math.max(2, this.cfg.bankrollUsdc * 0.05);
+      const drift = Math.abs(bal.usdc - this.inventory.state.freeUsdc) > driftThreshold;
       if (drift) {
-        log.warn('balance drift detected; taking exchange as truth', {
+        log.warn('[RECONCILER] balance drift detected; taking exchange as truth', {
           localFree: this.inventory.state.freeUsdc,
           exchange: bal.usdc,
+          threshold: driftThreshold,
         });
         this.inventory.forceBalance(bal.usdc);
       }
+
+      // B3: Share position reconciliation (live mode only)
+      let shareDrift = false;
+      if (this.currentConditionId) {
+        try {
+          const positions = await this.clob.fetchPositions(this.currentConditionId);
+          const localYes = this.inventory.state.yesPosition;
+          const localNo = this.inventory.state.noPosition;
+          const driftYes = Math.abs(positions.yes - localYes);
+          const driftNo = Math.abs(positions.no - localNo);
+          log.info('[RECONCILER] share check', {
+            exchangeYes: positions.yes,
+            exchangeNo: positions.no,
+            localYes,
+            localNo,
+            driftYes: driftYes.toFixed(2),
+            driftNo: driftNo.toFixed(2),
+          });
+          if (driftYes > driftThreshold || driftNo > driftThreshold) {
+            shareDrift = true;
+            log.error('[RECONCILER] share drift detected', {
+              exchangeYes: positions.yes, localYes,
+              exchangeNo: positions.no, localNo,
+            });
+            this.inventory.forceSharePositions(positions.yes, positions.no);
+          }
+        } catch (e) {
+          log.warn('[RECONCILER] share position fetch failed', { err: String(e) });
+        }
+      }
+
       this.last = {
         ok: true,
         usdc: bal.usdc,
         openOrderCount: open.length,
         drift,
+        shareDrift,
         lastRun: Date.now(),
       };
       return this.last;
@@ -85,6 +127,7 @@ export class Reconciler {
         usdc: this.inventory.state.freeUsdc,
         openOrderCount: 0,
         drift: true,
+        shareDrift: false,
         lastRun: Date.now(),
       };
       throw new ReconcileError('reconcile failed', { err: String(e) });

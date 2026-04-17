@@ -12,6 +12,7 @@ import {
 import { getLogger } from '../utils/logger';
 import { clamp01 } from '../utils/math';
 import { newFillId, newOrderId } from '../utils/ids';
+import { QueueModel } from './queueModel';
 
 const log = getLogger('paper');
 
@@ -38,6 +39,7 @@ export class PaperTrader extends EventEmitter {
   private lastPoly: PolySnapshot | null = null;
   private lastFeatures: FeatureSnapshot | null = null;
   private currentRegime: Regime = 'low_vol_balanced';
+  private queueModel = new QueueModel();
 
   constructor(private readonly cfg: BotConfig) {
     super();
@@ -127,11 +129,8 @@ export class PaperTrader extends EventEmitter {
         const remaining = o.sizeShares - o.filledSize;
         const partial = Math.random() < this.cfg.paperPartialFillProb;
         const fillSize = partial ? remaining * (0.2 + Math.random() * 0.6) : remaining;
-        const slippageBps = this.cfg.paperSlippageBps * (0.5 + Math.random());
-        const slippage = slippageBps / 10_000;
-        // slippage penalizes the fill price against us
-        const signedSlip = o.side === 'BUY' ? slippage : -slippage;
-        const filledPrice = Math.max(0.01, Math.min(0.99, o.price + signedSlip));
+        // H4: Maker fills execute at exactly the limit price (no slippage)
+        const filledPrice = o.price;
         const fee = (fillSize * filledPrice * this.cfg.paperMakerFeeBps) / 10_000;
         o.filledSize += fillSize;
         const fill: Fill = {
@@ -167,15 +166,25 @@ export class PaperTrader extends EventEmitter {
     }
   }
 
+  /** H2: Use QueueModel for depth-based queue estimation instead of random */
+  private computeQueueFactor(o: SimOrder, _f: FeatureSnapshot): number {
+    if (!this.lastPoly) return 0.5; // fallback
+    const book = o.token === 'YES' ? this.lastPoly.yesBook : this.lastPoly.noBook;
+    const levels = o.side === 'BUY' ? book.bids : book.asks;
+    const queueAhead = this.queueModel.estimatePosition(o, levels);
+    const typicalFillSize = o.sizeShares;
+    return this.queueModel.priorityProb(queueAhead, typicalFillSize);
+  }
+
   private computeFillProb(o: SimOrder, f: FeatureSnapshot): number {
     const base = this.cfg.paperFillProbBase;
-    // regime multipliers
+    // H1: Corrected regime multipliers — chop = maker-friendly, trending = toxic
     const rm: Record<Regime, number> = {
-      low_vol_balanced: 1.0,
-      low_vol_directional: 1.2,
-      medium_vol: 1.4,
-      high_vol_chop: 1.6,
-      high_vol_trend: 2.0,
+      low_vol_balanced: 0.8,      // quiet = fewer fills (nobody trading)
+      low_vol_directional: 0.7,   // directional = toxic, fewer maker fills
+      medium_vol: 1.0,            // baseline
+      high_vol_chop: 1.3,         // chop = mean reversion = maker-friendly
+      high_vol_trend: 0.5,        // trend = toxic flow = maker gets picked off
     };
     const regMul = rm[this.currentRegime] ?? 1;
 
@@ -187,14 +196,14 @@ export class PaperTrader extends EventEmitter {
     // If on bid, we fill when market moves down to us; closer distance = more likely.
     const distPenalty = Math.exp(-distBps / 60); // 60bps scale
 
-    // toxicity multiplier: informed flow preferentially fills us at worse prices
-    const toxMul = 1 + 0.8 * (f.toxicFlowProxy - this.cfg.paperToxicityBaseline);
+    // H1: Corrected toxicity multiplier — high toxicity slashes fill prob
+    const toxMul = Math.max(0.1, 1 - (f.toxicFlowProxy ?? 0) * 1.5);
 
     // liquidity mult: thin book => more unpredictable fills
     const liqMul = 0.6 + 0.8 * clamp01(f.liquidityScore);
 
-    // queue position penalty
-    const queueMul = 1 / (0.5 + o.simQueuePos);
+    // H2: Wire QueueModel — use real depth-based estimation instead of random
+    const queueMul = this.computeQueueFactor(o, f);
 
     // convert to per-250ms prob
     const perTickBase = 1 - Math.pow(1 - base * regMul * distPenalty * toxMul * liqMul * queueMul, 0.25);

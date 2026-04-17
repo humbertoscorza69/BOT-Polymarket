@@ -11,6 +11,7 @@ import { getLogger } from '../utils/logger';
 import { newQuoteId } from '../utils/ids';
 import { PaperTrader } from '../core/paperTrader';
 import { ClobDriver } from './clobDriver';
+import { InventoryEngine } from './inventoryEngine';
 
 const log = getLogger('order-manager');
 
@@ -19,6 +20,8 @@ export interface OrderManagerOpts {
   cfg: BotConfig;
   paper?: PaperTrader;
   clob?: ClobDriver;
+  inventory?: InventoryEngine;
+  getPolySnapshot?: () => import('../types').PolySnapshot | null;
 }
 
 /**
@@ -59,6 +62,14 @@ export class OrderManager extends EventEmitter {
   setMarket(m: PolymarketMarket | null): void {
     if (this.market?.conditionId !== m?.conditionId) {
       this.cancelAll('market_rotation').catch(() => { /* ignore */ });
+      // B2: Reset inventory on market rotation
+      if (this.opts.inventory && this.market) {
+        const { residualUsdc } = this.opts.inventory.reset();
+        if (Math.abs(residualUsdc) > 0.5) {
+          log.warn('[ROTATION] residual position from old market — not tracked post-rotation', { residualUsdc: residualUsdc.toFixed(2) });
+        }
+        log.info('[ROTATION] inventory reset — old market positions zeroed');
+      }
     }
     this.market = m;
   }
@@ -134,6 +145,31 @@ export class OrderManager extends EventEmitter {
     sizeShares: number;
     tokenId: string;
   }): Promise<void> {
+    // B1: Pre-trade inventory cap check
+    if (this.opts.inventory && w.side === 'BUY') {
+      const sizeUsdc = w.price * w.sizeShares;
+      if (!this.opts.inventory.canAccumulate(w.token, sizeUsdc)) {
+        log.warn('[INVENTORY] blocked order — would exceed cap', { side: w.side, token: w.token, sizeUsdc: sizeUsdc.toFixed(2) });
+        return;
+      }
+    }
+
+    // H3: Post-only guard — prevent crossing the book
+    if (this.opts.getPolySnapshot) {
+      const snap = this.opts.getPolySnapshot();
+      if (snap) {
+        const book = w.token === 'YES' ? snap.yesBook : snap.noBook;
+        if (w.side === 'BUY' && book.asks.length > 0 && w.price >= book.asks[0].price) {
+          log.warn('[POST-ONLY] buy would cross ask — skipping', { buyPrice: w.price, bestAsk: book.asks[0].price, token: w.token });
+          return;
+        }
+        if (w.side === 'SELL' && book.bids.length > 0 && w.price <= book.bids[0].price) {
+          log.warn('[POST-ONLY] sell would cross bid — skipping', { sellPrice: w.price, bestBid: book.bids[0].price, token: w.token });
+          return;
+        }
+      }
+    }
+
     const intent: QuoteIntent = {
       side: w.side,
       token: w.token,

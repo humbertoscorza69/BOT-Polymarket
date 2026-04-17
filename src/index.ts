@@ -117,6 +117,8 @@ async function main(): Promise<void> {
     cfg,
     paper,
     clob,
+    inventory,
+    getPolySnapshot: () => lastPoly,
   });
   const fills = new FillTracker();
 
@@ -174,6 +176,7 @@ async function main(): Promise<void> {
       if (asset) binanceFeed.setAsset(asset);
     }
     orderManager.setMarket(market);
+    reconciler.setConditionId(market.conditionId);
   });
 
   // Fill processing pipeline

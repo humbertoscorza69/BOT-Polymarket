@@ -146,6 +146,29 @@ export class ClobDriver {
     });
   }
 
+  async fetchPositions(conditionId: string): Promise<{ yes: number; no: number }> {
+    return this.guarded(async () => {
+      if (!this.client) throw new ExecutionError('client not initialized');
+      // Try getPositions or similar SDK method
+      if (typeof this.client.getPositions === 'function') {
+        const r = await this.client.getPositions({ conditionId });
+        const positions = Array.isArray(r) ? r : [r];
+        let yes = 0;
+        let no = 0;
+        for (const p of positions) {
+          if (!p) continue;
+          const size = Number(p.size ?? p.balance ?? 0);
+          const outcome = String(p.outcome ?? p.token ?? '');
+          if (outcome === 'Yes' || outcome === 'YES' || p.tokenId === conditionId) yes += size;
+          else no += size;
+        }
+        return { yes, no };
+      }
+      log.debug('getPositions not available on CLOB client');
+      return { yes: 0, no: 0 };
+    });
+  }
+
   async fetchTradeHistory(): Promise<Array<Record<string, unknown>>> {
     return this.guarded(async () => {
       if (!this.client) throw new ExecutionError('client not initialized');

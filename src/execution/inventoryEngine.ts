@@ -34,6 +34,30 @@ export class InventoryEngine extends EventEmitter {
     this.emit('update', this.s);
   }
 
+  /** Force share positions to exchange truth (B3: reconciler share tracking) */
+  forceSharePositions(yesPos: number, noPos: number): void {
+    this.s.yesPosition = yesPos;
+    this.s.noPosition = noPos;
+    this.s.lastUpdate = Date.now();
+    this.emit('update', this.s);
+  }
+
+  /** Reset inventory for market rotation (B2). Logs residual if non-trivial. */
+  reset(): { residualUsdc: number } {
+    const yUsdc = this.s.yesPosition * (this.s.yesAvgCost || 0.5);
+    const nUsdc = this.s.noPosition * (this.s.noAvgCost || 0.5);
+    const residual = yUsdc - nUsdc;
+    this.s.yesPosition = 0;
+    this.s.noPosition = 0;
+    this.s.yesAvgCost = 0;
+    this.s.noAvgCost = 0;
+    this.s.unrealizedPnl = 0;
+    this.s.normalizedSkew = 0;
+    this.s.lastUpdate = Date.now();
+    this.emit('update', this.s);
+    return { residualUsdc: residual };
+  }
+
   /**
    * Apply a fill. Returns realized pnl delta produced by this fill.
    */
