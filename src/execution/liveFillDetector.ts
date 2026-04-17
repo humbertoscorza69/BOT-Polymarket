@@ -22,6 +22,10 @@ export interface LiveFillDetectorOpts {
   /** POL-35 VERIFY-10: invoked when the poll sees open orders spanning
    *  more than one market. Caller should cancel-all and halt. */
   onMultiMarket?: (markets: string[]) => void;
+  /** POL-35-I CHECK-9: invoked with detection-latency (ms) each time a fill
+   *  is detected. Measured as now - lastPollTs: the upper-bound time between
+   *  when the fill actually happened on-exchange and when we noticed it. */
+  onFillDetectLatency?: (ms: number) => void;
 }
 
 /**
@@ -38,6 +42,7 @@ export class LiveFillDetector extends EventEmitter {
   private polling = false;
   private pollCount = 0;
   private fillsDetected = 0;
+  private lastPollTs = 0; // CHECK-9: for fillDetect latency upper-bound
 
   constructor(private readonly opts: LiveFillDetectorOpts) {
     super();
@@ -129,6 +134,11 @@ export class LiveFillDetector extends EventEmitter {
         this.fillsDetected++;
         const ctx = this.opts.getContext();
         const fill = this.buildFill(order, ctx);
+        // CHECK-9: fillDetect latency = time since last poll (upper bound —
+        // the fill actually happened at some point in that interval).
+        if (this.opts.onFillDetectLatency && this.lastPollTs > 0) {
+          this.opts.onFillDetectLatency(Date.now() - this.lastPollTs);
+        }
         log.info('[FILL-DETECT] live fill detected', {
           orderId: order.quoteId,
           exchangeOrderId: eid,
@@ -142,6 +152,7 @@ export class LiveFillDetector extends EventEmitter {
       }
 
       this.lastSeenIds = exchangeIds;
+      this.lastPollTs = Date.now();
     } catch (e) {
       log.warn('[FILL-DETECT] poll error (non-fatal)', { err: String(e) });
     } finally {

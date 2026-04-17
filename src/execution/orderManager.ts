@@ -96,6 +96,36 @@ export class OrderManager extends EventEmitter {
     this.active.delete(quoteId);
   }
 
+  /**
+   * POL-35-K tick rounding. Exposed so pair-edge validation can use the
+   * POST-round prices (what actually reaches the exchange), not the raw
+   * computed prices. Direction:
+   *   - Maker BUY: floor (stays below ask → remains maker)
+   *   - Maker SELL: ceil (stays above bid → remains maker)
+   *   - Taker/flatten: nearest (accept either direction)
+   * Then clamps to [tick, 1-tick] and snaps to 4 decimals for float safety.
+   */
+  private roundToTick(price: number, side: 'BUY' | 'SELL', taker: boolean): number {
+    const tick = this.opts.cfg.tickSize;
+    // Guard explicitly for undefined/NaN — `NaN <= 0` is false so a naive
+    // `tick <= 0` check falls through and the arithmetic below produces NaN.
+    if (!Number.isFinite(tick) || tick <= 0) return price;
+    // Integer-tick math with epsilon. Division like `0.46 / 0.01` yields
+    // 45.99999... in IEEE 754, so `Math.floor` would drop a full tick down
+    // to 0.45. Multiplying by an integer tick count (100 for tick=0.01) plus
+    // a tiny epsilon snaps near-integer artifacts onto the right cell.
+    const ticksPerUnit = Math.round(1 / tick);
+    const scaled = price * ticksPerUnit;
+    const EPS = 1e-9;
+    let tickIdx: number;
+    if (taker) tickIdx = Math.round(scaled);
+    else if (side === 'BUY') tickIdx = Math.floor(scaled + EPS);
+    else tickIdx = Math.ceil(scaled - EPS);
+    let rounded = tickIdx / ticksPerUnit;
+    rounded = Math.max(tick, Math.min(1 - tick, rounded));
+    return Math.round(rounded * 10_000) / 10_000;
+  }
+
   async applyQuote(q: QuoteResult): Promise<void> {
     if (this.cancelling) return;
     if (!this.market) return;
@@ -118,29 +148,36 @@ export class OrderManager extends EventEmitter {
       want.push({ side: 'SELL', token: 'NO', price: q.noAsk, sizeShares: q.noAskSize, tokenId: this.market.noTokenId });
     }
 
-    // POL-35-L: Pair-edge validation. When placing BUY YES and BUY NO
-    // simultaneously (directly, or via SELL→BUY-NO conversion from zero
-    // inventory), the two prices MUST sum to strictly less than $1 — the
-    // difference is our maker edge. Without this check, the bot can end
-    // up paying $1.12 for a $1.00 resolution (guaranteed loss).
-    const buyYesPrice = want.find((w) => w.side === 'BUY' && w.token === 'YES')?.price;
-    const directBuyNoPrice = want.find((w) => w.side === 'BUY' && w.token === 'NO')?.price;
-    const sellYesForConversion = want.find((w) => w.side === 'SELL' && w.token === 'YES');
+    // POL-35-L + CHECK-3: Pair-edge validation using POST-ROUND prices.
+    // We simulate the tick-rounding that place() will apply (including the
+    // SELL→BUY-NO conversion path) so the check validates what actually
+    // reaches the exchange — not the pre-round computed values. Without
+    // post-round validation, a pair that passes at 210 bps could hit the
+    // exchange at 110 bps after both sides round inward by half a tick.
     const inv = this.opts.inventory?.state;
-    // SELL YES converts to BUY NO @ (1 - sellPrice) when yesPosition <= 0
-    const effectiveBuyNo =
-      directBuyNoPrice ??
-      (sellYesForConversion && (!inv || inv.yesPosition <= 0)
-        ? 1 - sellYesForConversion.price
-        : undefined);
+    const buyYesRaw = want.find((w) => w.side === 'BUY' && w.token === 'YES')?.price;
+    const buyYesRounded = buyYesRaw !== undefined ? this.roundToTick(buyYesRaw, 'BUY', false) : undefined;
 
-    if (buyYesPrice !== undefined && effectiveBuyNo !== undefined) {
-      const pairSum = buyYesPrice + effectiveBuyNo;
+    const directBuyNoRaw = want.find((w) => w.side === 'BUY' && w.token === 'NO')?.price;
+    const directBuyNoRounded = directBuyNoRaw !== undefined ? this.roundToTick(directBuyNoRaw, 'BUY', false) : undefined;
+
+    // SELL YES converts to BUY NO at (1 - sellPrice) when yesPosition <= 0.
+    // The converted price is then floor-rounded as a BUY.
+    const sellYesForConversion = want.find((w) => w.side === 'SELL' && w.token === 'YES');
+    const willConvert = sellYesForConversion && (!inv || inv.yesPosition <= 0);
+    const convertedBuyNoRounded = willConvert
+      ? this.roundToTick(1 - sellYesForConversion.price, 'BUY', false)
+      : undefined;
+
+    const effectiveBuyNo = directBuyNoRounded ?? convertedBuyNoRounded;
+
+    if (buyYesRounded !== undefined && effectiveBuyNo !== undefined) {
+      const pairSum = buyYesRounded + effectiveBuyNo;
       const pairEdgeBps = (1 - pairSum) * 10_000;
       const minEdgeBps = this.opts.cfg.minPairEdgeBps;
       if (pairEdgeBps < minEdgeBps) {
-        log.error('[PAIR-CHECK] insufficient edge — skipping paired BUY YES + BUY NO', {
-          yesBuy: buyYesPrice.toFixed(4),
+        log.error('[PAIR-CHECK] post-round edge insufficient — skipping paired BUY YES + BUY NO', {
+          yesBuy: buyYesRounded.toFixed(4),
           noBuy: effectiveBuyNo.toFixed(4),
           pairSum: pairSum.toFixed(4),
           edgeBps: pairEdgeBps.toFixed(0),
@@ -158,7 +195,7 @@ export class OrderManager extends EventEmitter {
         }
         return;
       }
-      log.debug('[PAIR-CHECK] edge ok', {
+      log.debug('[PAIR-CHECK] post-round edge ok', {
         pairSum: pairSum.toFixed(4),
         edgeBps: pairEdgeBps.toFixed(0),
       });
@@ -261,29 +298,10 @@ export class OrderManager extends EventEmitter {
     }
 
     // POL-35-K: Tick-size rounding. Polymarket binary markets tick at $0.01
-    // by default. Fractional penny prices like 0.56532 indicate a client bug
-    // and produce taker-style fills at weird prices. Round direction:
-    //   - Maker BUY: floor to tick (stays below ask → maker)
-    //   - Maker SELL: ceil to tick (stays above bid → maker)
-    //   - Taker / flatten (bypassPostOnly): reverse (toward the market)
-    const tick = this.opts.cfg.tickSize;
-    if (tick > 0) {
-      const roundFloor = (p: number): number => Math.floor(p / tick) * tick;
-      const roundCeil = (p: number): number => Math.ceil(p / tick) * tick;
-      const roundNearest = (p: number): number => Math.round(p / tick) * tick;
-      if (w.bypassPostOnly) {
-        // Flatten: accept small rounding either way — nearest tick.
-        w.price = roundNearest(w.price);
-      } else if (w.side === 'BUY') {
-        w.price = roundFloor(w.price);
-      } else {
-        w.price = roundCeil(w.price);
-      }
-      // Clamp to [tick, 1-tick] to avoid edge-case 0 or 1 prices.
-      w.price = Math.max(tick, Math.min(1 - tick, w.price));
-      // Fix JS floating point: snap to 4 decimals (covers 0.001 ticks too).
-      w.price = Math.round(w.price * 10_000) / 10_000;
-    }
+    // by default. Rounds via the shared roundToTick helper so applyQuote's
+    // pair check and this place() produce identical post-round prices.
+    // Idempotent — rounding an already-rounded value is a no-op.
+    w.price = this.roundToTick(w.price, w.side, Boolean(w.bypassPostOnly));
 
     // H3: Post-only guard — prevent crossing the book (bypassed on flatten
     // since flatten's whole purpose is to aggressively exit).

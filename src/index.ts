@@ -83,11 +83,16 @@ async function main(): Promise<void> {
   const snapshotStore = new SnapshotStore(cfg.snapshotsDir);
   const paramsStore = new ParamsStore(cfg.paramsStateFile, defaultAdaptiveParams(cfg.avGamma, cfg.avK));
 
+  // Latency tracker — instantiated early so downstream engines can wire
+  // into it at construction time.
+  const latency = new LatencyTracker();
+
   // Core engines
   const featureStore = new FeatureStore();
   const fair = new FairValueModel(cfg);
   const avellaneda = new AvellanedaStoikov(cfg);
   const quoteEngine = new QuoteEngine(cfg, fair, avellaneda);
+  quoteEngine.onFvLatency = (ms) => latency.record('fv', ms); // CHECK-9
   const regime = new RegimeDetector();
   const health = new HealthEngine(cfg);
   const pnl = new PnlTracker();
@@ -104,9 +109,7 @@ async function main(): Promise<void> {
     pnlNetMinUsdc: cfg.killPnlNetMin,
   };
   const killMonitor = new KillThresholdMonitor(killThresholds);
-  const latency = new LatencyTracker();
-  // POL-35-I: wire ClobDriver latency into the tracker once the driver exists.
-  // Set after ClobDriver is constructed below.
+  // POL-35-I: ClobDriver latency wired below after driver construction.
   const metricsHistory: PaperTradingMetrics[] = [];
   const sessionStartTime = cfg.startTs;
 
@@ -183,6 +186,7 @@ async function main(): Promise<void> {
       orderManager.cancelAll('multi_market_violation').catch((e) => log.warn('multi-market cancelAll failed', { err: String(e) }));
       risk.forceState('HALTED', `multi-market: ${markets.length} markets`);
     },
+    onFillDetectLatency: (ms: number) => latency.record('fillDetect', ms), // CHECK-9
     getContext: () => {
       if (!currentMarket) return null;
       const asset = detectPrimaryAsset(currentMarket, cfg.targetAssets) || cfg.targetAssets[0];
@@ -242,6 +246,9 @@ async function main(): Promise<void> {
   let lastBin: BinanceSnapshot | null = null;
   let lastFeatures: ReturnType<FeatureStore['update']> = null;
   let currentMarket: PolymarketMarket | null = null;
+  // CHECK-9 e2e: timestamp of the latest Binance update. Used to measure
+  // end-to-end latency from external price move to order confirmed on-exchange.
+  let lastBinUpdateTs = 0;
 
   const onPoly = (p: PolySnapshot): void => {
     const t0 = Date.now();
@@ -253,6 +260,7 @@ async function main(): Promise<void> {
   const onBin = (b: BinanceSnapshot): void => {
     const t0 = Date.now();
     lastBin = b;
+    lastBinUpdateTs = t0; // CHECK-9: for e2e measurement
     latency.record('feedBin', Date.now() - t0);
   };
 
@@ -312,9 +320,12 @@ async function main(): Promise<void> {
     log.info(`[AS-DECOMP-PRE] fill=${fill.id} preFillStalenessBps=${(preFillStaleness / binMidAtFill * 10000).toFixed(1)}`);
   });
 
-  // Track orders placed for fill rate metric
+  // Track orders placed for fill rate metric + CHECK-9 e2e latency
   orderManager.on('placed', () => {
     metricsCalc.recordOrderPlaced();
+    if (lastBinUpdateTs > 0) {
+      latency.record('e2e', Date.now() - lastBinUpdateTs);
+    }
   });
 
   // latency arb defense wiring
