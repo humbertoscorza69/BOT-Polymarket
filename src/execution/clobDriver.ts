@@ -94,7 +94,7 @@ export class ClobDriver {
               passphrase: this.cfg.polyApiPassphrase,
             }
           : undefined,
-        clobLib.SignatureType?.POLY_PROXY ?? 2,
+        1, // POLY_GNOSIS_SAFE — verified working for funder-based auth (POL-36)
         this.cfg.polyFunderAddress,
       );
 
@@ -107,7 +107,7 @@ export class ClobDriver {
             Chain.POLYGON ?? this.cfg.polyChainId,
             wallet,
             creds,
-            clobLib.SignatureType?.POLY_PROXY ?? 2,
+            1, // POLY_GNOSIS_SAFE
             this.cfg.polyFunderAddress,
           );
         } catch (e) {
