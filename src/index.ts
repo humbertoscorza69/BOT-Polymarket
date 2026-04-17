@@ -219,6 +219,18 @@ async function main(): Promise<void> {
     }
   }
 
+  // Set warmup on first market: skip partial cycle, observe only
+  let warmupUntilMs = 0; // epoch ms — no quoting until this time
+  discovery.once('rotation', ({ market }: { market: PolymarketMarket }) => {
+    if (market.endDateTs) {
+      warmupUntilMs = market.endDateTs * 1000;
+      log.info('[WARMUP] started — observing only until current cycle expires', {
+        warmupUntil: new Date(warmupUntilMs).toISOString(),
+        secsRemaining: Math.round((warmupUntilMs - Date.now()) / 1000),
+      });
+    }
+  });
+
   if (cfg.dataSource === 'real') {
     log.info('[BOOT] starting real feeds (discovery + poly + binance)');
     await discovery.start();
@@ -246,7 +258,6 @@ async function main(): Promise<void> {
   let lastExpiryTs = 0; // tracks the expiry of the last cycle we saw
   let completedCycles5m = 0;
   let completedCycles15m = 0;
-  let warmupUntilMs = 0; // epoch ms — no quoting until this time
 
   /** Returns seconds until current market expires, or Infinity if unknown. */
   function secsToExpiry(): number {
@@ -264,17 +275,6 @@ async function main(): Promise<void> {
     const hms = d.toISOString().slice(11, 19);
     return `[cycle=${interval}:${hms}Z]`;
   }
-
-  // Set warmup on first market: skip partial cycle, observe only
-  discovery.once('rotation', ({ market }: { market: PolymarketMarket }) => {
-    if (market.endDateTs) {
-      warmupUntilMs = market.endDateTs * 1000;
-      log.info('[WARMUP] started — observing only until current cycle expires', {
-        warmupUntil: new Date(warmupUntilMs).toISOString(),
-        secsRemaining: Math.round((warmupUntilMs - Date.now()) / 1000),
-      });
-    }
-  });
 
   // Track cycle completions on market rotation
   discovery.on('rotation', ({ market }: { market: PolymarketMarket }) => {
