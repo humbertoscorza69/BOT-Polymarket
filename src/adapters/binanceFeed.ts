@@ -105,9 +105,12 @@ export class BinanceFeed extends EventEmitter {
     log.info('binance setAsset', { asset, symbol: sym });
     this.symbol = sym;
     this.available = true;
-    // reset state
+    // reset state — clear everything to prevent cross-asset velocity spikes (POL-39 Fix 3)
     this.bestBid = null;
     this.bestAsk = null;
+    this.lastBookUpdate = 0;
+    this.lastTradeUpdate = 0;
+    this.lastSnapshot = null;
     this.priceHistory.clear();
     this.tradeWindow = [];
     this.volumeEma.reset();

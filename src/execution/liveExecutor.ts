@@ -1,6 +1,7 @@
 import { BotConfig } from '../config';
 import { getLogger } from '../utils/logger';
 import { ClobDriver } from './clobDriver';
+import { InventoryEngine } from './inventoryEngine';
 import { Reconciler } from './reconciler';
 
 const log = getLogger('live-executor');
@@ -16,6 +17,7 @@ export class LiveExecutor {
     private readonly cfg: BotConfig,
     private readonly clob: ClobDriver,
     private readonly reconciler: Reconciler,
+    private readonly inventory?: InventoryEngine,
   ) {}
 
   isReady(): boolean {
@@ -57,6 +59,29 @@ export class LiveExecutor {
         openOrders: report.openOrderCount,
         drift: report.drift,
       });
+
+      // POL-39 Fix 1: Cancel orphaned orders from previous session
+      if (report.openOrderCount > 0) {
+        log.warn('[RECOVERY] cancelling orphaned orders from previous session', {
+          count: report.openOrderCount,
+        });
+        try {
+          const cancelled = await this.clob.cancelAll();
+          log.info('[RECOVERY] orphaned orders cancelled', { cancelled });
+        } catch (e) {
+          log.warn('[RECOVERY] orphan cancel failed (non-fatal)', { err: String(e) });
+        }
+        // Re-fetch balance after cancellation (collateral may have been freed)
+        try {
+          const freshBal = await this.clob.fetchBalance();
+          if (this.inventory) {
+            this.inventory.forceBalance(freshBal.usdc);
+          }
+          log.info('[RECOVERY] post-cancel balance', { usdc: freshBal.usdc });
+        } catch (e) {
+          log.warn('[RECOVERY] post-cancel balance fetch failed', { err: String(e) });
+        }
+      }
     } catch (e) {
       log.error('reconciliation threw; refusing live', { err: String(e) });
       return false;

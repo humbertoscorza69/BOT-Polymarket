@@ -28,6 +28,7 @@ import { FillTracker } from './execution/fillTracker';
 import { ClobDriver } from './execution/clobDriver';
 import { Reconciler } from './execution/reconciler';
 import { LiveExecutor } from './execution/liveExecutor';
+import { LiveFillDetector } from './execution/liveFillDetector';
 import { DiscordAlerter } from './utils/discord';
 import { DashboardServer } from './dashboard/server';
 import { FillsStore } from './persistence/fillsStore';
@@ -35,6 +36,7 @@ import { SessionStore } from './persistence/sessionStore';
 import { SnapshotStore } from './persistence/snapshotStore';
 import { ParamsStore, defaultAdaptiveParams } from './persistence/paramsStore';
 import {
+  ActiveOrder,
   AdverseSelectionSample,
   BinanceSnapshot,
   Fill,
@@ -149,7 +151,7 @@ async function main(): Promise<void> {
   const paper = new PaperTrader(cfg);
   const clob = new ClobDriver(cfg);
   const reconciler = new Reconciler(cfg, clob, inventory);
-  const liveExec = new LiveExecutor(cfg, clob, reconciler);
+  const liveExec = new LiveExecutor(cfg, clob, reconciler, inventory);
   const orderManager = new OrderManager({
     mode: cfg.mode,
     cfg,
@@ -159,6 +161,44 @@ async function main(): Promise<void> {
     getPolySnapshot: () => lastPoly,
   });
   const fills = new FillTracker();
+
+  // POL-39 Fix A: Live fill detection — polls exchange, detects fills by order disappearance
+  const liveFillDetector = cfg.mode === 'live' ? new LiveFillDetector({
+    clob,
+    pollMs: 5000,
+    getActiveOrders: () => orderManager.getActive(),
+    getContext: () => {
+      if (!currentMarket) return null;
+      const asset = detectPrimaryAsset(currentMarket, cfg.targetAssets) || cfg.targetAssets[0];
+      const interval = detectPrimaryInterval(currentMarket, cfg.targetIntervals) || cfg.targetIntervals[0];
+      return {
+        conditionId: currentMarket.conditionId,
+        asset,
+        interval,
+        regime: regime.snapshot().current,
+        fair: lastFeatures?.fairYes ?? lastPoly?.midYes ?? 0.5,
+        mid: lastPoly?.midYes ?? 0.5,
+        runId: cfg.runId,
+      };
+    },
+  }) : null;
+
+  // Wire live fill detector into the fill pipeline
+  if (liveFillDetector) {
+    liveFillDetector.on('fill', (fill: Fill, order: ActiveOrder) => {
+      // Remove the filled order from OrderManager's active map
+      orderManager.removeActive(order.quoteId);
+      // Emit through OrderManager so the normal fill pipeline fires
+      orderManager.emit('fill', fill, order);
+    });
+
+    // Track cancels so the detector doesn't false-detect them as fills
+    orderManager.on('cancelled', (order: ActiveOrder) => {
+      if (order.exchangeOrderId) {
+        liveFillDetector.notifyCancelled(order.exchangeOrderId);
+      }
+    });
+  }
 
   // Telemetry + dashboard
   const telemetry = new TelemetryHub();
@@ -275,6 +315,28 @@ async function main(): Promise<void> {
       log.error('live bootstrap failed; exiting to protect funds');
       process.exit(2);
     }
+    // POL-39 Fix A: Start live fill detection after bootstrap
+    if (liveFillDetector) liveFillDetector.start();
+  }
+
+  // POL-39 Fix 2: Load prior fills to restore fill count and fee tracking across restarts
+  try {
+    const priorFills = fillsStore.recent(500);
+    if (priorFills.length > 0) {
+      let totalFees = 0;
+      for (const fill of priorFills) {
+        // Replay through PnL tracker — realized delta unknown (not stored in Fill),
+        // pass 0 so fill count and fees are tracked correctly.
+        pnl.recordFillRealized(fill, 0);
+        totalFees += fill.feeUsdc;
+      }
+      log.info('[RECOVERY] restored fill history from prior sessions', {
+        fillCount: priorFills.length,
+        totalFees: totalFees.toFixed(4),
+      });
+    }
+  } catch (e) {
+    log.warn('[RECOVERY] failed to load prior fills (non-fatal)', { err: String(e) });
   }
 
   // Set warmup on first market: skip partial cycle, observe only
@@ -599,6 +661,7 @@ async function main(): Promise<void> {
     });
     clearInterval(tickTimer);
     clearInterval(keepaliveTimer);
+    if (liveFillDetector) liveFillDetector.stop();
     autoheal.stop();
     adverse.stop();
     paper.stop();

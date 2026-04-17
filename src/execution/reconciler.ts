@@ -73,6 +73,9 @@ export class Reconciler {
       const driftThreshold = Math.max(2, this.cfg.bankrollUsdc * 0.05);
       const hasDrift = Math.abs(bal.usdc - this.inventory.state.freeUsdc) > driftThreshold;
       // First reconcile is always an initial sync — don't flag as drift
+      // POL-39: drift flag is transient — only true for the report returned by this call,
+      // not persisted in this.last. The reconciler corrects drift immediately (forceBalance),
+      // so keeping the flag true for 120s between reconciles caused unnecessary HALTs.
       const drift = hasDrift && !this.isFirstReconcile;
       if (hasDrift) {
         log.warn('[RECONCILER] balance drift detected; taking exchange as truth', {
@@ -119,8 +122,10 @@ export class Reconciler {
         ok: true,
         usdc: bal.usdc,
         openOrderCount: open.length,
-        drift,
-        shareDrift,
+        // POL-39: drift was already corrected (forceBalance/forceSharePositions above).
+        // Don't persist the flag — it would keep risk HALTED for 120s until next reconcile.
+        drift: false,
+        shareDrift: false,
         lastRun: Date.now(),
       };
       return this.last;

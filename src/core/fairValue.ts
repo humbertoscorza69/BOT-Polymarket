@@ -15,39 +15,39 @@ export class FairValueModel {
     const base = f.microYes ?? f.midYes ?? 0.5;
     const ema = f.emaFair ?? base;
 
-    // Weights (from config)
-    const W = {
-      micro: this.cfg.wMicroprice,
-      polyImbal: this.cfg.wPolyImbalance,
-      binImbal: this.cfg.wBinanceImbalance,
-      binAggr: this.cfg.wBinanceAggressor,
-      binMomentum: this.cfg.wBinanceMomentum,
-    };
+    // Weights from config — W_MICROPRICE controls anchor blend,
+    // remaining weights control signal nudge magnitudes.
+    const wMicro = this.cfg.wMicroprice;
+    const wPolyImbal = this.cfg.wPolyImbalance;
+    const wBinImbal = this.cfg.wBinanceImbalance;
+    const wBinAggr = this.cfg.wBinanceAggressor;
+    const wBinMom = this.cfg.wBinanceMomentum;
 
-    // Nudge scale — convert signal to probability space nudge.
-    // Each signal is in [-1, 1] and we convert to a small probability offset.
-    const scale = 0.015; // 150 bps max per signal before clamping
+    // Signal scale — converts [-1,1] signals to probability-space nudges.
+    // At scale=0.03, a weight=1.0 max-strength signal shifts fair by ±3 cents.
+    const scale = 0.03;
 
-    // poly imbalance nudge
-    const polyN = f.polyBookImbalance * scale * 0.7;
-    // binance book imbalance
-    const binN = f.binanceBookImbalance * scale;
-    // aggressor
-    const aggrN = f.binanceAggressorRatio * scale * 0.8;
-    // momentum (persistence * sign of velocity)
+    // Compute signal nudges (each in [-scale, +scale])
+    const polyImbalNudge = clamp(f.polyBookImbalance, -1, 1) * scale;
+    const binImbalNudge = clamp(f.binanceBookImbalance, -1, 1) * scale;
+    const aggrNudge = clamp(f.binanceAggressorRatio, -1, 1) * scale;
     const momSign = Math.sign(f.binancePriceVelocityBps);
-    const momN = momSign * f.momentumPersistence * scale * 0.9;
+    const momNudge = momSign * clamp01(f.momentumPersistence) * scale;
 
-    // confirm amplifier
+    // Confirm amplifier — correlated signals strengthen the move
     const confirmMul = 1 + clamp01(f.confirm) * 0.4;
 
-    // blend center: micro + EMA mixing
-    const anchor = 0.65 * base + 0.35 * ema;
+    // Anchor: blend microprice with EMA. wMicro controls how much
+    // weight goes to fresh microprice vs smoothed EMA.
+    const anchor = wMicro * base + (1 - wMicro) * ema;
 
-    // raw fair
+    // Raw fair = anchor + weighted signal nudges
     let raw =
       anchor +
-      (W.polyImbal * polyN + W.binImbal * binN + W.binAggr * aggrN + W.binMomentum * momN) * confirmMul;
+      (wPolyImbal * polyImbalNudge +
+       wBinImbal * binImbalNudge +
+       wBinAggr * aggrNudge +
+       wBinMom * momNudge) * confirmMul;
 
     // volatility penalty: shrink toward anchor under high vol
     const volDrag = clamp01(f.realizedVolEma / 200); // 200bps rolling move => heavy drag

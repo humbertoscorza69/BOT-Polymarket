@@ -306,7 +306,7 @@ export interface RangeRule {
 }
 
 export const POL2_RANGES: Record<string, RangeRule> = {
-  QUOTE_BASE_HALF_SPREAD_BPS: { min: 50, max: 400 },
+  QUOTE_BASE_HALF_SPREAD_BPS: { min: 50, max: 1000 },
   QUOTE_SKEW_FACTOR: { min: 1.0, max: 5.0 },
   QUOTE_TTR_WEIGHT: { min: 0.5, max: 2.0 },
   QUOTE_REGIME_SENSITIVITY: { min: 0.5, max: 2.0 },

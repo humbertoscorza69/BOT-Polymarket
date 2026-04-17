@@ -87,6 +87,11 @@ export class OrderManager extends EventEmitter {
     return this.replaceCount;
   }
 
+  /** Remove an order from the active map (e.g., after live fill detection). */
+  removeActive(quoteId: string): void {
+    this.active.delete(quoteId);
+  }
+
   async applyQuote(q: QuoteResult): Promise<void> {
     if (this.cancelling) return;
     if (!this.market) return;
@@ -155,20 +160,34 @@ export class OrderManager extends EventEmitter {
       }
     }
 
-    // SELL gate: block or clamp SELL orders against current position
+    // SELL gate: convert SELL to BUY-opposite when no position (synthetic sell),
+    // or clamp SELL size to current position.
     if (this.opts.inventory && w.side === 'SELL') {
       const pos = w.token === 'YES'
         ? this.opts.inventory.state.yesPosition
         : this.opts.inventory.state.noPosition;
       if (pos <= 0) {
-        const now = Date.now();
-        if (now - this.lastSellBlockLogTs > 30_000) {
-          log.warn('[INVENTORY] blocked SELL — no position to sell', { token: w.token, position: pos });
-          this.lastSellBlockLogTs = now;
+        // POL-39 Fix B: Convert SELL YES → BUY NO (or SELL NO → BUY YES).
+        // On Polymarket, BUY NO at price P is equivalent to SELL YES at (1-P).
+        if (this.market) {
+          const origToken = w.token;
+          w.side = 'BUY';
+          w.token = origToken === 'YES' ? 'NO' : 'YES';
+          w.tokenId = origToken === 'YES' ? this.market.noTokenId : this.market.yesTokenId;
+          w.price = Math.round((1 - w.price) * 100) / 100;
+          // Re-check BUY inventory cap for the converted order
+          const sizeUsdc = w.price * w.sizeShares;
+          if (!this.opts.inventory.canAccumulate(w.token, sizeUsdc, w.sizeShares)) {
+            log.warn('[SYNTHETIC] blocked — would exceed cap', { token: w.token, sizeUsdc: sizeUsdc.toFixed(2) });
+            return;
+          }
+          log.info('[SYNTHETIC] converted SELL to BUY opposite', {
+            from: `SELL ${origToken}`, to: `BUY ${w.token}`, price: w.price.toFixed(4),
+          });
+        } else {
+          return; // no market context, can't convert
         }
-        return;
-      }
-      if (w.sizeShares > pos) {
+      } else if (w.sizeShares > pos) {
         log.info('[INVENTORY] clamped SELL size to current position', {
           token: w.token, from: w.sizeShares.toFixed(4), to: pos.toFixed(4),
         });

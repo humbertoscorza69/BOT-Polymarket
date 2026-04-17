@@ -13,3 +13,7 @@ coverage/
 .vscode/
 .idea/
 *.tsbuildinfo
+
+.claude/
+data/metrics/
+*.log.bak
