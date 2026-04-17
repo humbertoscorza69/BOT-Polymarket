@@ -1,8 +1,11 @@
+import EventEmitter from 'eventemitter3';
 import { BotConfig } from '../config';
 import { ClobDriver } from './clobDriver';
 import { InventoryEngine } from './inventoryEngine';
 import { getLogger } from '../utils/logger';
 import { ReconcileError } from '../utils/errors';
+import { Fill } from '../types';
+import { newFillId } from '../utils/ids';
 
 const log = getLogger('reconciler');
 
@@ -16,7 +19,7 @@ export interface ReconcileReport {
   lastRun: number;
 }
 
-export class Reconciler {
+export class Reconciler extends EventEmitter {
   private last: ReconcileReport = {
     ok: false,
     usdc: 0,
@@ -33,7 +36,9 @@ export class Reconciler {
     private readonly cfg: BotConfig,
     private readonly clob: ClobDriver,
     private readonly inventory: InventoryEngine,
-  ) {}
+  ) {
+    super();
+  }
 
   setConditionId(conditionId: string | null): void {
     this.currentConditionId = conditionId;
@@ -78,13 +83,47 @@ export class Reconciler {
       // so keeping the flag true for 120s between reconciles caused unnecessary HALTs.
       const drift = hasDrift && !this.isFirstReconcile;
       if (hasDrift) {
+        const localFree = this.inventory.state.freeUsdc;
+        const driftAmount = bal.usdc - localFree;
         log.warn('[RECONCILER] balance drift detected; taking exchange as truth', {
-          localFree: this.inventory.state.freeUsdc,
+          localFree,
           exchange: bal.usdc,
+          driftAmount: driftAmount.toFixed(4),
           threshold: driftThreshold,
           isInitialSync: this.isFirstReconcile,
         });
         this.inventory.forceBalance(bal.usdc);
+
+        // Fix 3: Emit synthetic fill when USDC drifts downward (we lost money we didn't track)
+        if (driftAmount < 0 && !this.isFirstReconcile) {
+          const syntheticFill: Fill = {
+            id: newFillId(),
+            ts: Date.now(),
+            orderId: 'reconciler-drift',
+            conditionId: this.currentConditionId ?? '',
+            asset: '',
+            interval: '',
+            token: 'YES',
+            side: 'BUY',
+            price: 0,
+            size: 0,
+            notional: Math.abs(driftAmount),
+            feeUsdc: 0,
+            regime: 'medium_vol',
+            fairAtFill: 0,
+            midAtFill: 0,
+            isMaker: false,
+            latencyMs: 0,
+            mode: 'live',
+            runId: '',
+          };
+          log.warn('[RECONCILER] emitting synthetic fill for downward drift', {
+            driftUsdc: driftAmount.toFixed(4),
+            fillId: syntheticFill.id,
+            source: 'reconciler',
+          });
+          this.emit('syntheticFill', syntheticFill);
+        }
       }
       this.isFirstReconcile = false;
 

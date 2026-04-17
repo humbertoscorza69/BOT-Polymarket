@@ -27,6 +27,14 @@ export class RiskManager extends EventEmitter {
   private events: RiskEvent[] = [];
   private lastTransition = Date.now();
 
+  // Fix 1: Balance-based kill switch — independent of PnL/fill accounting
+  private startBalance: number | null = null;
+  private sessionPeakBalance: number | null = null;
+
+  // Fix 4: Consecutive RECONCILE_DRIFT HALT counter
+  private consecutiveDriftHalts = 0;
+  private terminalKill = false;
+
   constructor(private readonly cfg: BotConfig) {
     super();
   }
@@ -116,6 +124,82 @@ export class RiskManager extends EventEmitter {
       this.emit('transition', ev);
     }
     return this.state;
+  }
+
+  /**
+   * Fix 1: Balance-based kill switch.
+   * Called every tick with the current exchange USDC balance.
+   * Compares against startBalance (recorded on first call) and sessionPeak.
+   * Returns true if a kill condition is met.
+   */
+  checkBalanceKill(currentBalance: number): boolean {
+    if (this.terminalKill) return true;
+
+    if (this.startBalance === null) {
+      this.startBalance = currentBalance;
+      this.sessionPeakBalance = currentBalance;
+      log.info('[BALANCE-KILL] start balance recorded', { startBalance: currentBalance });
+      return false;
+    }
+
+    if (currentBalance > this.sessionPeakBalance!) {
+      this.sessionPeakBalance = currentBalance;
+    }
+
+    const sessionLoss = this.startBalance - currentBalance;
+    const drawdownFromPeak = this.sessionPeakBalance! - currentBalance;
+
+    if (sessionLoss > this.cfg.riskSessionLossCapUsdc) {
+      const reason = `balance kill: session loss $${sessionLoss.toFixed(2)} > cap $${this.cfg.riskSessionLossCapUsdc}`;
+      log.error('[BALANCE-KILL] ' + reason, {
+        startBalance: this.startBalance,
+        currentBalance,
+        sessionLoss,
+        cap: this.cfg.riskSessionLossCapUsdc,
+      });
+      this.terminalKill = true;
+      this.forceState('EMERGENCY', reason);
+      return true;
+    }
+
+    if (drawdownFromPeak > this.cfg.riskDrawdownCapUsdc) {
+      const reason = `balance kill: drawdown $${drawdownFromPeak.toFixed(2)} > cap $${this.cfg.riskDrawdownCapUsdc}`;
+      log.error('[BALANCE-KILL] ' + reason, {
+        peak: this.sessionPeakBalance,
+        currentBalance,
+        drawdown: drawdownFromPeak,
+        cap: this.cfg.riskDrawdownCapUsdc,
+      });
+      this.terminalKill = true;
+      this.forceState('EMERGENCY', reason);
+      return true;
+    }
+
+    return false;
+  }
+
+  /** Fix 4: Track consecutive RECONCILE_DRIFT HALTs. Returns true if terminal. */
+  trackDriftHalt(isDriftHalt: boolean): boolean {
+    if (this.terminalKill) return true;
+
+    if (isDriftHalt) {
+      this.consecutiveDriftHalts++;
+      log.warn('[DRIFT-HALT] consecutive drift halt', { count: this.consecutiveDriftHalts });
+      if (this.consecutiveDriftHalts >= 3) {
+        const reason = `terminal: ${this.consecutiveDriftHalts} consecutive RECONCILE_DRIFT HALTs`;
+        log.error('[DRIFT-HALT] ' + reason);
+        this.terminalKill = true;
+        this.forceState('EMERGENCY', reason);
+        return true;
+      }
+    } else {
+      this.consecutiveDriftHalts = 0;
+    }
+    return false;
+  }
+
+  isTerminal(): boolean {
+    return this.terminalKill;
   }
 
   forceState(state: RiskState, reason: string): void {

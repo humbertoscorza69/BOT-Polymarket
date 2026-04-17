@@ -183,6 +183,20 @@ async function main(): Promise<void> {
     },
   }) : null;
 
+  // Fix 3: Wire reconciler synthetic fills into the fill pipeline
+  reconciler.on('syntheticFill', (fill: Fill) => {
+    fills.record(fill);
+    fillsStore.append(fill);
+    // Don't call inventory.applyFill — reconciler already called forceBalance
+    pnl.recordFillRealized(fill, -fill.notional); // record as realized loss
+    log.warn('[RECONCILER-FILL] synthetic fill recorded', {
+      fillId: fill.id,
+      notional: fill.notional.toFixed(4),
+      source: 'reconciler',
+      pnl: pnl.state().net?.toFixed(2),
+    });
+  });
+
   // Wire live fill detector into the fill pipeline
   if (liveFillDetector) {
     liveFillDetector.on('fill', (fill: Fill, order: ActiveOrder) => {
@@ -473,6 +487,33 @@ async function main(): Promise<void> {
         inventory: inventory.state,
         totalFills: pnl.state().totalFills,
       });
+
+      // Fix 4: Track consecutive RECONCILE_DRIFT HALTs — terminal after 3
+      const isDriftHalt = riskState === 'HALTED' && reconciler.getLast().drift === true;
+      if (risk.trackDriftHalt(isDriftHalt)) {
+        log.error('[TERMINAL] 3 consecutive RECONCILE_DRIFT HALTs — hard kill');
+        shutdown('TERMINAL_DRIFT_HALTS').catch((e) => log.error('shutdown error', { err: String(e) }));
+        return;
+      }
+
+      // Fix 1: Balance-based kill switch — check every 10 ticks in live mode
+      if (cfg.mode === 'live' && clob.isAvailable && tickCount % 10 === 0) {
+        clob.fetchBalance().then((bal) => {
+          if (risk.checkBalanceKill(bal.usdc)) {
+            log.error('[BALANCE-KILL] session terminated — wallet loss exceeded threshold');
+            shutdown('BALANCE_KILL').catch((e) => log.error('shutdown error', { err: String(e) }));
+          }
+        }).catch((e) => log.warn('[BALANCE-KILL] balance fetch failed (non-fatal)', { err: String(e) }));
+      }
+
+      // Fix 5: Exit stranded inventory — check every 20 ticks in live mode
+      if (cfg.mode === 'live' && liveExec.isReady() && tickCount % 20 === 0) {
+        liveExec.exitStrandedInventory(
+          orderManager.getActive(),
+          currentMarket ? { yesTokenId: currentMarket.yesTokenId, noTokenId: currentMarket.noTokenId } : null,
+          lastPoly?.midYes ?? null,
+        ).catch((e) => log.warn('[EXIT] stranded inventory check failed', { err: String(e) }));
+      }
 
       const params = paramsStore.get();
 
