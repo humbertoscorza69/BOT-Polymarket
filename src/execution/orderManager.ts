@@ -35,6 +35,7 @@ export class OrderManager extends EventEmitter {
   private replaceCount = 0;
   private market: PolymarketMarket | null = null;
   private cancelling = false;
+  private lastSellBlockLogTs = 0;
 
   constructor(private readonly opts: OrderManagerOpts) {
     super();
@@ -160,7 +161,11 @@ export class OrderManager extends EventEmitter {
         ? this.opts.inventory.state.yesPosition
         : this.opts.inventory.state.noPosition;
       if (pos <= 0) {
-        log.warn('[INVENTORY] blocked SELL — no position to sell', { token: w.token, position: pos });
+        const now = Date.now();
+        if (now - this.lastSellBlockLogTs > 30_000) {
+          log.warn('[INVENTORY] blocked SELL — no position to sell', { token: w.token, position: pos });
+          this.lastSellBlockLogTs = now;
+        }
         return;
       }
       if (w.sizeShares > pos) {

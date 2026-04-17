@@ -537,12 +537,20 @@ async function main(): Promise<void> {
     }
   }, cfg.tickMs);
 
+  // Keepalive heartbeat — periodic log so we can detect silent process death
+  const keepaliveTimer = setInterval(() => {
+    const uptimeSec = Math.round(process.uptime());
+    const memMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+    log.info('[KEEPALIVE]', { uptimeSec, memMb, ticks: tickCount, fills: pnl.state().totalFills, pnl: pnl.state().net?.toFixed(2) });
+  }, 60_000);
+
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     log.warn('shutdown requested', { signal });
     clearInterval(tickTimer);
+    clearInterval(keepaliveTimer);
     autoheal.stop();
     adverse.stop();
     paper.stop();
@@ -593,10 +601,12 @@ async function main(): Promise<void> {
   process.on('uncaughtException', (e) => {
     console.error('[FATAL] uncaughtException:', e);
     log.error('uncaughtException', { err: String(e), stack: e.stack });
+    shutdown('uncaughtException').catch(() => process.exit(1));
   });
   process.on('unhandledRejection', (e) => {
     console.error('[FATAL] unhandledRejection:', e);
     log.error('unhandledRejection', { err: String(e) });
+    shutdown('unhandledRejection').catch(() => process.exit(1));
   });
   process.on('exit', (code) => {
     console.error(`[EXIT] code=${code} uptime=${process.uptime().toFixed(1)}s`);

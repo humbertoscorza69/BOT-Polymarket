@@ -38,6 +38,14 @@ export class DashboardServer {
     this.server = this.app.listen(this.cfg.dashboardPort, this.cfg.dashboardHost, () => {
       log.info(`dashboard at http://${this.cfg.dashboardHost}:${this.cfg.dashboardPort}`);
     });
+    this.server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        log.warn(`dashboard port ${this.cfg.dashboardPort} already in use — continuing without dashboard`);
+        this.server = null;
+      } else {
+        log.error('dashboard server error', { err: String(err) });
+      }
+    });
   }
 
   async stop(): Promise<void> {
