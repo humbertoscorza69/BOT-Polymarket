@@ -269,6 +269,7 @@ async function main(): Promise<void> {
     log.info('rotating market', { slug: market.slug });
     currentMarket = market;
     marketHistory.record(market, 'discovery');
+    featureStore.reset(); // CHECK-14: clear EMAs so old-market state doesn't contaminate new market
     if (cfg.dataSource === 'sim') {
       simFeed.setMarket(market);
     } else {

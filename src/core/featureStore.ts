@@ -212,4 +212,24 @@ export class FeatureStore {
     return this.midHistory.values();
   }
 
+  /** Reset all rolling state. Call on market rotation so EMAs from
+   *  the old market (different asset/price regime) don't contaminate
+   *  the new market's first ticks. */
+  reset(): void {
+    this.midHistory.clear();
+    this.moveHistory.clear();
+    this.spreadHistory.clear();
+    this.emaFair.reset();
+    this.volEma.reset();
+    this.churnEma.reset();
+    this.depthAsymEma.reset();
+    this.momentumEma.reset();
+    this.toxicEma.reset();
+    this.participationEma.reset();
+    this.lastTopBid = null;
+    this.lastTopAsk = null;
+    this.quoteChurnCount = 0;
+    this.quoteChurnWindowStart = Date.now();
+  }
+
 }
