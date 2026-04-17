@@ -28,6 +28,7 @@ import { FillTracker } from './execution/fillTracker';
 import { ClobDriver } from './execution/clobDriver';
 import { Reconciler } from './execution/reconciler';
 import { LiveExecutor } from './execution/liveExecutor';
+import { DiscordAlerter } from './utils/discord';
 import { DashboardServer } from './dashboard/server';
 import { FillsStore } from './persistence/fillsStore';
 import { SessionStore } from './persistence/sessionStore';
@@ -102,6 +103,40 @@ async function main(): Promise<void> {
   const killMonitor = new KillThresholdMonitor(killThresholds);
   const metricsHistory: PaperTradingMetrics[] = [];
   const sessionStartTime = cfg.startTs;
+
+  // Discord alerting
+  const discord = new DiscordAlerter(cfg.discordWebhookUrl);
+  if (discord.isConfigured()) {
+    log.info('[DISCORD] webhook configured, alerts enabled');
+
+    killMonitor.on('kill', (ev) => {
+      discord.send('critical', 'KILL THRESHOLD BREACHED', ev.message, {
+        Metric: ev.metric,
+        Value: String(ev.currentValue),
+        Threshold: String(ev.threshold),
+      });
+    });
+
+    killMonitor.on('warning', (ev) => {
+      discord.send('warn', 'Kill Warning', ev.message, {
+        Metric: ev.metric,
+        Value: String(ev.currentValue),
+        Threshold: String(ev.threshold),
+      });
+    });
+
+    risk.on('transition', (ev) => {
+      const severity = ev.severity === 'error' ? 'error' as const : ev.severity === 'warn' ? 'warn' as const : 'info' as const;
+      discord.send(severity, `Risk: ${ev.state}`, ev.reason, {
+        Code: ev.code,
+        State: ev.state,
+        PnL: ev.pnl != null ? ev.pnl.toFixed(2) : 'N/A',
+        Drawdown: ev.drawdown != null ? ev.drawdown.toFixed(2) : 'N/A',
+      });
+    });
+  } else {
+    log.info('[DISCORD] no webhook URL configured, alerts disabled');
+  }
 
   // Execution
   const cancelCoord = new CancelCoordinator({
@@ -316,6 +351,13 @@ async function main(): Promise<void> {
       });
     }
     lastExpiryTs = market.endDateTs || 0;
+  });
+
+  // Startup notification
+  discord.send('info', 'Bot Started', `Mode: ${cfg.mode} | Data: ${cfg.dataSource}`, {
+    RunId: cfg.runId,
+    Bankroll: `$${cfg.bankrollUsdc}`,
+    Mode: cfg.mode,
   });
 
   // Main tick: compute features, regime, health, quote, and push telemetry.
@@ -549,6 +591,12 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log.warn('shutdown requested', { signal });
+    await discord.send('warn', 'Bot Shutting Down', `Reason: ${signal}`, {
+      RunId: cfg.runId,
+      Uptime: `${Math.round(process.uptime())}s`,
+      Fills: String(pnl.state().totalFills),
+      PnL: pnl.state().net?.toFixed(2) ?? 'N/A',
+    });
     clearInterval(tickTimer);
     clearInterval(keepaliveTimer);
     autoheal.stop();
