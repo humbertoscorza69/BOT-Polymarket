@@ -198,6 +198,11 @@ async function main(): Promise<void> {
     });
   });
 
+  // Track orders placed for fill rate metric
+  orderManager.on('placed', () => {
+    metricsCalc.recordOrderPlaced();
+  });
+
   // latency arb defense wiring
   cancelCoord.on('cancelAll', (reason: string) => {
     log.info('latency-arb trigger', { reason });

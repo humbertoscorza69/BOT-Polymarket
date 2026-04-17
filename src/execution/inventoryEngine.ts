@@ -130,12 +130,18 @@ export class InventoryEngine extends EventEmitter {
   }
 
   /** Check if we can accumulate more notional on a given side */
-  canAccumulate(token: 'YES' | 'NO', sizeUsdc: number): boolean {
+  canAccumulate(token: 'YES' | 'NO', sizeUsdc: number, sizeShares: number = 0): boolean {
     const currentYesUsdc = this.s.yesPosition * (this.s.yesAvgCost || 0.5);
     const currentNoUsdc = this.s.noPosition * (this.s.noAvgCost || 0.5);
     const cap = this.cfg.riskMaxInventoryUsdc;
-    if (token === 'YES') return currentYesUsdc + sizeUsdc <= cap;
-    return currentNoUsdc + sizeUsdc <= cap;
+    // USDC notional cap (existing belt)
+    if (token === 'YES' && currentYesUsdc + sizeUsdc > cap) return false;
+    if (token === 'NO' && currentNoUsdc + sizeUsdc > cap) return false;
+    // Per-side share cap (suspenders)
+    const maxShares = this.cfg.inventoryMaxShares;
+    if (token === 'YES' && this.s.yesPosition + sizeShares > maxShares) return false;
+    if (token === 'NO' && this.s.noPosition + sizeShares > maxShares) return false;
+    return true;
   }
 
   get emergencyTriggered(): boolean {

@@ -145,11 +145,11 @@ export class OrderManager extends EventEmitter {
     sizeShares: number;
     tokenId: string;
   }): Promise<void> {
-    // B1: Pre-trade inventory cap check
+    // B1: Pre-trade inventory cap check (USDC notional + per-side share cap)
     if (this.opts.inventory && w.side === 'BUY') {
       const sizeUsdc = w.price * w.sizeShares;
-      if (!this.opts.inventory.canAccumulate(w.token, sizeUsdc)) {
-        log.warn('[INVENTORY] blocked order — would exceed cap', { side: w.side, token: w.token, sizeUsdc: sizeUsdc.toFixed(2) });
+      if (!this.opts.inventory.canAccumulate(w.token, sizeUsdc, w.sizeShares)) {
+        log.warn('[INVENTORY] blocked order — would exceed cap', { side: w.side, token: w.token, sizeUsdc: sizeUsdc.toFixed(2), sizeShares: w.sizeShares });
         return;
       }
     }

@@ -86,13 +86,14 @@ export const DEFAULT_KILL_THRESHOLDS: KillThresholds = {
   fillRateMax: 2.0,
   takerExecutionRateMax: 0.05,
   staleNoQuoteRateMax: 0.30,
-  inventoryMismatchPctMax: 5,
+  inventoryMismatchPctMax: 100,
   pnlNetMinUsdc: -15,
   regimeNegativePnl: true,
 };
 
 export class MetricsCalculator {
   private fills: Fill[] = [];
+  private ordersPlaced = 0;
   private sessionStartTime = Date.now();
   private stalePriceTriggered = 0;
   private emergencyModeTriggered = 0;
@@ -103,6 +104,10 @@ export class MetricsCalculator {
 
   recordFill(fill: Fill): void {
     this.fills.push(fill);
+  }
+
+  recordOrderPlaced(): void {
+    this.ordersPlaced++;
   }
 
   /** Called when a market cycle completes (contract expiry). */
@@ -238,9 +243,11 @@ export class MetricsCalculator {
   }
 
   private calculateFillQuality(): FillQualityMetrics {
-    const orderCount = new Set(this.fills.map((f) => f.orderId)).size;
+    const uniqueOrdersFilled = new Set(this.fills.map((f) => f.orderId)).size;
     const fillCount = this.fills.length;
-    const fillRate = orderCount > 0 ? fillCount / orderCount : 0;
+    // fillRate = fraction of placed orders that received at least one fill
+    const orderCount = this.ordersPlaced;
+    const fillRate = orderCount > 0 ? uniqueOrdersFilled / orderCount : 0;
 
     const unwindRate = 0; // unwind tracking not available on Fill type
 
@@ -269,14 +276,16 @@ export class MetricsCalculator {
   }
 
   private calculateInventory(inventory: InventoryState, maxShares: number): InventoryMetrics {
-    const currentShares = Math.abs(inventory.yesPosition || 0);
-    const utilizationPct = (currentShares / maxShares) * 100;
+    const yesShares = Math.abs(inventory.yesPosition || 0);
+    const noShares = Math.abs(inventory.noPosition || 0);
+    const maxSide = Math.max(yesShares, noShares);
+    const utilizationPct = maxShares > 0 ? (maxSide / maxShares) * 100 : 0;
 
     return {
-      mismatchPct: 0,
+      mismatchPct: Math.round(utilizationPct),
       emergencyModeTriggerCount: this.emergencyModeTriggered,
       maxInventoryUtilizationPct: Math.round(utilizationPct),
-      currentInventory: currentShares,
+      currentInventory: maxSide,
     };
   }
 
@@ -342,6 +351,11 @@ export class MetricsCalculator {
       return `KILL: Stale price triggers ${(takerExec.stalePriceTriggerRate * 100).toFixed(1)}% > max ${(thresholds.staleNoQuoteRateMax * 100).toFixed(1)}%`;
     }
 
+    // Inventory breach kill (always active — hard circuit breaker)
+    if (inventory.mismatchPct >= thresholds.inventoryMismatchPctMax) {
+      return `KILL: Inventory utilization ${inventory.mismatchPct}% >= max ${thresholds.inventoryMismatchPctMax}%`;
+    }
+
     // Dollar-based PnL kill threshold (always active — this is a hard circuit breaker)
     if (pnlNetUsdc < thresholds.pnlNetMinUsdc) {
       return `KILL: Net PnL $${pnlNetUsdc.toFixed(2)} < minimum $${thresholds.pnlNetMinUsdc.toFixed(2)}`;
@@ -352,6 +366,7 @@ export class MetricsCalculator {
 
   reset(): void {
     this.fills = [];
+    this.ordersPlaced = 0;
     this.sessionStartTime = Date.now();
     this.stalePriceTriggered = 0;
     this.emergencyModeTriggered = 0;
