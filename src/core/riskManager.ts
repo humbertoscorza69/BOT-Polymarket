@@ -19,6 +19,7 @@ export interface RiskInputs {
   orderRejections: number;
   reconcileDrift: boolean;
   inventory: InventoryState;
+  totalFills: number;
 }
 
 export class RiskManager extends EventEmitter {
@@ -66,11 +67,11 @@ export class RiskManager extends EventEmitter {
       next = 'THROTTLED';
       reason = `consecutive losses ${inp.consecutiveLosses}`;
       code = 'CONSEC_LOSS';
-    } else if (inp.adverseSelectionEma >= this.cfg.riskToxicFlowEmaCap) {
+    } else if (inp.totalFills >= 3 && inp.adverseSelectionEma >= this.cfg.riskToxicFlowEmaCap) {
       next = 'HALTED';
       reason = `toxic flow ema ${inp.adverseSelectionEma.toFixed(2)}`;
       code = 'TOXIC_FLOW';
-    } else if (inp.adverseSelectionEma >= this.cfg.riskToxicFlowEmaCap * 0.75) {
+    } else if (inp.totalFills >= 3 && inp.adverseSelectionEma >= this.cfg.riskToxicFlowEmaCap * 0.75) {
       next = 'THROTTLED';
       reason = `elevated toxicity ${inp.adverseSelectionEma.toFixed(2)}`;
       code = 'ELEVATED_TOX';

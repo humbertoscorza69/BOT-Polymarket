@@ -342,6 +342,7 @@ async function main(): Promise<void> {
         orderRejections: orderManager.getRejectionsCount(),
         reconcileDrift: reconciler.getLast().drift === true && cfg.mode === 'live',
         inventory: inventory.state,
+        totalFills: pnl.state().totalFills,
       });
 
       const params = paramsStore.get();
