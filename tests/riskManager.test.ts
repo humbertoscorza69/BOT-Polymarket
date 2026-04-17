@@ -38,6 +38,7 @@ describe('RiskManager', () => {
       orderRejections: 0,
       reconcileDrift: false,
       inventory: emptyInv,
+      totalFills: 0,
     });
     expect(s).toBe('NORMAL');
   });
@@ -54,6 +55,7 @@ describe('RiskManager', () => {
       orderRejections: 0,
       reconcileDrift: false,
       inventory: emptyInv,
+      totalFills: 0,
     });
     expect(s).toBe('EMERGENCY');
   });
@@ -70,6 +72,7 @@ describe('RiskManager', () => {
       orderRejections: 0,
       reconcileDrift: false,
       inventory: emptyInv,
+      totalFills: 3,
     });
     expect(s).toBe('HALTED');
   });
