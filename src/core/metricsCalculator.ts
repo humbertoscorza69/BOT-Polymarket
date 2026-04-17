@@ -85,7 +85,7 @@ export const DEFAULT_KILL_THRESHOLDS: KillThresholds = {
   fillRateMin: 0.02,
   fillRateMax: 2.0,
   takerExecutionRateMax: 0.05,
-  staleNoQuoteRateMax: 0.30,
+  staleNoQuoteRateMax: 0.60,
   inventoryMismatchPctMax: 100,
   pnlNetMinUsdc: -15,
   regimeNegativePnl: true,

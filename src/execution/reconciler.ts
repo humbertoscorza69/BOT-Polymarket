@@ -27,6 +27,7 @@ export class Reconciler {
   };
   private timer: NodeJS.Timeout | null = null;
   private currentConditionId: string | null = null;
+  private isFirstReconcile = true;
 
   constructor(
     private readonly cfg: BotConfig,
@@ -70,15 +71,19 @@ export class Reconciler {
       const [bal, open] = await Promise.all([this.clob.fetchBalance(), this.clob.fetchOpenOrders()]);
       // M2: Tightened drift threshold
       const driftThreshold = Math.max(2, this.cfg.bankrollUsdc * 0.05);
-      const drift = Math.abs(bal.usdc - this.inventory.state.freeUsdc) > driftThreshold;
-      if (drift) {
+      const hasDrift = Math.abs(bal.usdc - this.inventory.state.freeUsdc) > driftThreshold;
+      // First reconcile is always an initial sync — don't flag as drift
+      const drift = hasDrift && !this.isFirstReconcile;
+      if (hasDrift) {
         log.warn('[RECONCILER] balance drift detected; taking exchange as truth', {
           localFree: this.inventory.state.freeUsdc,
           exchange: bal.usdc,
           threshold: driftThreshold,
+          isInitialSync: this.isFirstReconcile,
         });
         this.inventory.forceBalance(bal.usdc);
       }
+      this.isFirstReconcile = false;
 
       // B3: Share position reconciliation (live mode only)
       let shareDrift = false;

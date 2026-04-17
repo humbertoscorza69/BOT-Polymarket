@@ -101,7 +101,18 @@ export class ClobDriver {
       if (!this.cfg.polyApiKey) {
         log.info('deriving CLOB api creds from wallet');
         try {
-          const creds = await this.client.createOrDeriveApiKey();
+          // SDK createApiKey may swallow 400 errors and return undefined instead
+          // of throwing — so check the result, then fall back to deriveApiKey.
+          let creds: { key: string; secret: string; passphrase: string } | undefined;
+          try {
+            creds = await this.client.createApiKey();
+          } catch {
+            log.info('createApiKey threw, falling back to deriveApiKey');
+          }
+          if (!creds?.key) {
+            log.info('createApiKey returned no key, deriving existing key');
+            creds = await this.client.deriveApiKey();
+          }
           this.client = new ClobClient(
             this.cfg.polymarketHttp,
             Chain.POLYGON ?? this.cfg.polyChainId,
@@ -111,7 +122,7 @@ export class ClobDriver {
             this.cfg.polyFunderAddress,
           );
         } catch (e) {
-          log.warn('createOrDeriveApiKey failed', { err: String(e) });
+          log.warn('api key derivation failed', { err: String(e) });
         }
       }
       this.initialized = true;
@@ -189,7 +200,7 @@ export class ClobDriver {
         price: inp.price,
         side: inp.side === 'BUY' ? (clobLib?.Side?.BUY ?? 'BUY') : (clobLib?.Side?.SELL ?? 'SELL'),
         size: inp.size,
-        feeRateBps: 0,
+        feeRateBps: 1000,
       };
       const built = await this.client.createOrder(order);
       const orderType = clobLib?.OrderType?.GTC ?? 'GTC';
