@@ -154,6 +154,23 @@ export class OrderManager extends EventEmitter {
       }
     }
 
+    // SELL gate: block or clamp SELL orders against current position
+    if (this.opts.inventory && w.side === 'SELL') {
+      const pos = w.token === 'YES'
+        ? this.opts.inventory.state.yesPosition
+        : this.opts.inventory.state.noPosition;
+      if (pos <= 0) {
+        log.warn('[INVENTORY] blocked SELL — no position to sell', { token: w.token, position: pos });
+        return;
+      }
+      if (w.sizeShares > pos) {
+        log.info('[INVENTORY] clamped SELL size to current position', {
+          token: w.token, from: w.sizeShares.toFixed(4), to: pos.toFixed(4),
+        });
+        w.sizeShares = pos;
+      }
+    }
+
     // H3: Post-only guard — prevent crossing the book
     if (this.opts.getPolySnapshot) {
       const snap = this.opts.getPolySnapshot();

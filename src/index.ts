@@ -246,6 +246,7 @@ async function main(): Promise<void> {
   let lastExpiryTs = 0; // tracks the expiry of the last cycle we saw
   let completedCycles5m = 0;
   let completedCycles15m = 0;
+  let warmupUntilMs = 0; // epoch ms — no quoting until this time
 
   /** Returns seconds until current market expires, or Infinity if unknown. */
   function secsToExpiry(): number {
@@ -263,6 +264,17 @@ async function main(): Promise<void> {
     const hms = d.toISOString().slice(11, 19);
     return `[cycle=${interval}:${hms}Z]`;
   }
+
+  // Set warmup on first market: skip partial cycle, observe only
+  discovery.once('rotation', ({ market }: { market: PolymarketMarket }) => {
+    if (market.endDateTs) {
+      warmupUntilMs = market.endDateTs * 1000;
+      log.info('[WARMUP] started — observing only until current cycle expires', {
+        warmupUntil: new Date(warmupUntilMs).toISOString(),
+        secsRemaining: Math.round((warmupUntilMs - Date.now()) / 1000),
+      });
+    }
+  });
 
   // Track cycle completions on market rotation
   discovery.on('rotation', ({ market }: { market: PolymarketMarket }) => {
@@ -403,8 +415,14 @@ async function main(): Promise<void> {
         });
       }
 
-      // Apply quote to order manager (paper or live) — skip during quiet period
-      if (quietMode === 'none' && (cfg.mode !== 'live' || liveExec.isReady())) {
+      // Warmup: observe feeds, build signal history, but don't place orders
+      const inWarmup = warmupUntilMs > 0 && Date.now() < warmupUntilMs;
+      if (inWarmup && tickCount % 20 === 1) {
+        log.info(`${cycleTag()} [WARMUP] ${Math.round((warmupUntilMs - Date.now()) / 1000)}s remaining — observing only, no quotes`);
+      }
+
+      // Apply quote to order manager (paper or live) — skip during quiet period and warmup
+      if (!inWarmup && quietMode === 'none' && (cfg.mode !== 'live' || liveExec.isReady())) {
         orderManager.applyQuote(quote).catch((e) => log.warn('applyQuote error', { err: String(e) }));
       }
 

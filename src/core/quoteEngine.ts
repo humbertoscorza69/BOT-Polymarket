@@ -136,11 +136,11 @@ export class QuoteEngine {
 
     // Convert USDC notional to shares (divide by price)
     const yesBidShares = yesBidSizeUsdc / Math.max(0.02, yesBid);
-    const yesAskShares = yesAskSizeUsdc / Math.max(0.02, 1 - yesAsk);
+    const yesAskShares = yesAskSizeUsdc / Math.max(0.02, yesAsk);
 
     // inventory adjustments: if we're long YES, reduce YES bid / boost YES ask
     let yBidSize = clampSize(yesBidShares, this.cfg.minOrderSizeUsdc / yesBid, this.cfg.maxOrderSizeUsdc / yesBid);
-    let yAskSize = clampSize(yesAskShares, this.cfg.minOrderSizeUsdc / (1 - yesAsk), this.cfg.maxOrderSizeUsdc / (1 - yesAsk));
+    let yAskSize = clampSize(yesAskShares, this.cfg.minOrderSizeUsdc / yesAsk, this.cfg.maxOrderSizeUsdc / yesAsk);
 
     if (invSkew > 0.5) {
       yBidSize = Math.floor(yBidSize * (1 - clamp01(invSkew * this.cfg.quoteSkewFactor)));
