@@ -76,7 +76,7 @@ export class Ema {
 
   update(x: number): number {
     if (!isNum(x)) return this._value ?? 0;
-    if (this._value === null) this._value = x;
+    if (this._value === null) this._value = this.alpha * x;
     else this._value = this.alpha * x + (1 - this.alpha) * this._value;
     return this._value;
   }
