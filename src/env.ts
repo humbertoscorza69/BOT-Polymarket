@@ -101,6 +101,7 @@ export interface EnvConfig {
   riskApiErrorCap: number;
   riskToxicFlowEmaCap: number;
   riskMaxInventoryUsdc: number;
+  riskMaxMarketExposureUsdc: number;
 
   advSample1sMs: number;
   advSample5sMs: number;
@@ -229,6 +230,7 @@ export function loadEnv(): EnvConfig {
     riskApiErrorCap: num(e.RISK_API_ERROR_CAP, 25),
     riskToxicFlowEmaCap: num(e.RISK_TOXIC_FLOW_EMA_CAP, 0.55),
     riskMaxInventoryUsdc: num(e.RISK_MAX_INVENTORY_USDC, 200),
+    riskMaxMarketExposureUsdc: num(e.RISK_MAX_MARKET_EXPOSURE_USDC, 15),
 
     advSample1sMs: num(e.ADV_SAMPLE_1S_MS, 1000),
     advSample5sMs: num(e.ADV_SAMPLE_5S_MS, 5000),

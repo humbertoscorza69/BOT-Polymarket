@@ -134,9 +134,12 @@ export class InventoryEngine extends EventEmitter {
     const currentYesUsdc = this.s.yesPosition * (this.s.yesAvgCost || 0.5);
     const currentNoUsdc = this.s.noPosition * (this.s.noAvgCost || 0.5);
     const cap = this.cfg.riskMaxInventoryUsdc;
-    // USDC notional cap (existing belt)
+    // Per-side USDC notional cap
     if (token === 'YES' && currentYesUsdc + sizeUsdc > cap) return false;
     if (token === 'NO' && currentNoUsdc + sizeUsdc > cap) return false;
+    // Combined market exposure cap (YES + NO notional)
+    const marketCap = this.cfg.riskMaxMarketExposureUsdc;
+    if (currentYesUsdc + currentNoUsdc + sizeUsdc > marketCap) return false;
     // Per-side share cap (suspenders)
     const maxShares = this.cfg.inventoryMaxShares;
     if (token === 'YES' && this.s.yesPosition + sizeShares > maxShares) return false;
