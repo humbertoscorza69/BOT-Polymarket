@@ -127,7 +127,7 @@ export class Reconciler extends EventEmitter {
       }
       this.isFirstReconcile = false;
 
-      // B3: Share position reconciliation (live mode only)
+      // Share position reconciliation (live mode only)
       let shareDrift = false;
       if (this.currentConditionId) {
         try {

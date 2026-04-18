@@ -67,7 +67,7 @@ export class OrderManager extends EventEmitter {
   setMarket(m: PolymarketMarket | null): void {
     if (this.market?.conditionId !== m?.conditionId) {
       this.cancelAll('market_rotation').catch(() => { /* ignore */ });
-      // B2: Reset inventory on market rotation
+      // Reset inventory on market rotation
       if (this.opts.inventory && this.market) {
         const { residualUsdc } = this.opts.inventory.reset();
         if (Math.abs(residualUsdc) > 0.5) {
@@ -253,7 +253,7 @@ export class OrderManager extends EventEmitter {
       return;
     }
 
-    // B1: Pre-trade inventory cap check (USDC notional + per-side share cap)
+    // Pre-trade inventory cap check (USDC notional + per-side share cap)
     if (this.opts.inventory && w.side === 'BUY' && !w.bypassInventoryCap) {
       const sizeUsdc = w.price * w.sizeShares;
       if (!this.opts.inventory.canAccumulate(w.token, sizeUsdc, w.sizeShares)) {
@@ -303,7 +303,7 @@ export class OrderManager extends EventEmitter {
     // Idempotent — rounding an already-rounded value is a no-op.
     w.price = this.roundToTick(w.price, w.side, Boolean(w.bypassPostOnly));
 
-    // H3: Post-only guard — prevent crossing the book (bypassed on flatten
+    // Post-only guard — prevent crossing the book (bypassed on flatten
     // since flatten's whole purpose is to aggressively exit).
     if (this.opts.getPolySnapshot && !w.bypassPostOnly) {
       const snap = this.opts.getPolySnapshot();

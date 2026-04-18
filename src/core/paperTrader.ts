@@ -129,7 +129,7 @@ export class PaperTrader extends EventEmitter {
         const remaining = o.sizeShares - o.filledSize;
         const partial = Math.random() < this.cfg.paperPartialFillProb;
         const fillSize = partial ? remaining * (0.2 + Math.random() * 0.6) : remaining;
-        // H4: Maker fills execute at exactly the limit price (no slippage)
+        // Maker fills execute at exactly the limit price (no slippage)
         const filledPrice = o.price;
         const fee = (fillSize * filledPrice * this.cfg.paperMakerFeeBps) / 10_000;
         o.filledSize += fillSize;
@@ -166,7 +166,7 @@ export class PaperTrader extends EventEmitter {
     }
   }
 
-  /** H2: Use QueueModel for depth-based queue estimation instead of random */
+  /** Use QueueModel for depth-based queue estimation instead of random */
   private computeQueueFactor(o: SimOrder, _f: FeatureSnapshot): number {
     if (!this.lastPoly) return 0.5; // fallback
     const book = o.token === 'YES' ? this.lastPoly.yesBook : this.lastPoly.noBook;
@@ -178,7 +178,7 @@ export class PaperTrader extends EventEmitter {
 
   private computeFillProb(o: SimOrder, f: FeatureSnapshot): number {
     const base = this.cfg.paperFillProbBase;
-    // H1: Corrected regime multipliers — chop = maker-friendly, trending = toxic
+    // Regime multipliers — chop = maker-friendly, trending = toxic
     const rm: Record<Regime, number> = {
       low_vol_balanced: 0.8,      // quiet = fewer fills (nobody trading)
       low_vol_directional: 0.7,   // directional = toxic, fewer maker fills
@@ -196,13 +196,13 @@ export class PaperTrader extends EventEmitter {
     // If on bid, we fill when market moves down to us; closer distance = more likely.
     const distPenalty = Math.exp(-distBps / 60); // 60bps scale
 
-    // H1: Corrected toxicity multiplier — high toxicity slashes fill prob
+    // Toxicity multiplier — high toxicity slashes fill prob
     const toxMul = Math.max(0.1, 1 - (f.toxicFlowProxy ?? 0) * 1.5);
 
     // liquidity mult: thin book => more unpredictable fills
     const liqMul = 0.6 + 0.8 * clamp01(f.liquidityScore);
 
-    // H2: Wire QueueModel — use real depth-based estimation instead of random
+    // Wire QueueModel — use real depth-based estimation instead of random
     const queueMul = this.computeQueueFactor(o, f);
 
     // convert to per-250ms prob

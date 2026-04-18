@@ -34,7 +34,7 @@ export class InventoryEngine extends EventEmitter {
     this.emit('update', this.s);
   }
 
-  /** Force share positions to exchange truth (B3: reconciler share tracking) */
+  /** Force share positions to exchange truth */
   forceSharePositions(yesPos: number, noPos: number): void {
     this.s.yesPosition = yesPos;
     this.s.noPosition = noPos;
@@ -42,7 +42,7 @@ export class InventoryEngine extends EventEmitter {
     this.emit('update', this.s);
   }
 
-  /** Reset inventory for market rotation (B2). Logs residual if non-trivial. */
+  /** Reset inventory for market rotation. Logs residual if non-trivial. */
   reset(): { residualUsdc: number } {
     const yUsdc = this.s.yesPosition * (this.s.yesAvgCost || 0.5);
     const nUsdc = this.s.noPosition * (this.s.noAvgCost || 0.5);
