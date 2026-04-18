@@ -107,6 +107,10 @@ async function main(): Promise<void> {
   const killThresholds: typeof DEFAULT_KILL_THRESHOLDS = {
     ...DEFAULT_KILL_THRESHOLDS,
     pnlNetMinUsdc: cfg.killPnlNetMin,
+    fillRateMin: cfg.killFillRateMin,
+    spreadBpsMin: cfg.killSpreadBpsMin,
+    adverseSelectionBpsMax: cfg.killAdverseSelectionBpsMax,
+    staleNoQuoteRateMax: cfg.killStaleNoQuoteRateMax,
   };
   const killMonitor = new KillThresholdMonitor(killThresholds);
   // POL-35-I: ClobDriver latency wired below after driver construction.
@@ -174,6 +178,13 @@ async function main(): Promise<void> {
     },
   });
   const fills = new FillTracker();
+
+  // Error ring buffer for dashboard (last 50 errors/warnings)
+  const recentErrors: Array<{ ts: number; msg: string }> = [];
+  const pushError = (msg: string) => {
+    recentErrors.push({ ts: Date.now(), msg });
+    if (recentErrors.length > 50) recentErrors.shift();
+  };
 
   // POL-39 Fix A / POL-35 VERIFY-1: Live fill detection — polls exchange, detects
   // fills by order disappearance. Poll interval configurable via FILL_DETECTOR_POLL_MS.
@@ -526,9 +537,19 @@ async function main(): Promise<void> {
         totalFills: pnl.state().totalFills,
       });
 
+      // Push risk escalations (warn/error severity) to dashboard error feed
+      const latestRiskEvents = risk.getEvents();
+      if (latestRiskEvents.length > 0) {
+        const last = latestRiskEvents[latestRiskEvents.length - 1];
+        if ((last.severity === 'warn' || last.severity === 'error') && last.ts > Date.now() - cfg.tickMs * 2) {
+          pushError(`Risk ${last.state}: ${last.reason}`);
+        }
+      }
+
       // Fix 4: Track consecutive RECONCILE_DRIFT HALTs — terminal after 3
       const isDriftHalt = riskState === 'HALTED' && reconciler.getLast().drift === true;
       if (risk.trackDriftHalt(isDriftHalt)) {
+        pushError('3 consecutive RECONCILE_DRIFT HALTs — hard kill');
         log.error('[TERMINAL] 3 consecutive RECONCILE_DRIFT HALTs — hard kill');
         shutdown('TERMINAL_DRIFT_HALTS').catch((e) => log.error('shutdown error', { err: String(e) }));
         return;
@@ -537,7 +558,9 @@ async function main(): Promise<void> {
       // Fix 1: Balance-based kill switch — check every 10 ticks in live mode
       if (cfg.mode === 'live' && clob.isAvailable && tickCount % 10 === 0) {
         clob.fetchBalance().then((bal) => {
+          telemetry.updatePartial({ exchangeBalance: bal.usdc });
           if (risk.checkBalanceKill(bal.usdc)) {
+            pushError(`Balance kill — USDC wallet loss exceeded threshold`);
             log.error('[BALANCE-KILL] session terminated — wallet loss exceeded threshold');
             shutdown('BALANCE_KILL').catch((e) => log.error('shutdown error', { err: String(e) }));
           }
@@ -639,7 +662,22 @@ async function main(): Promise<void> {
           activeOrders: orderManager.getActive().length,
           ttlSecs: Math.round(ttlSecs),
           quietMode: quietMode !== 'none' ? quietMode : undefined,
+          postOnlyBlocks: orderManager.getPostOnlyBlocksPerMin() + '/min',
         });
+      }
+
+      // FIX-6A: Periodic fair value decomposition log (every ~60s)
+      if (tickCount % 120 === 1 && quote.internalFair !== undefined) {
+        log.info(`[FAIR-VALUE] fv=${quote.internalFair.toFixed(4)} | microprice=${(features.microYes ?? 0).toFixed(4)} | polyImbal=${features.polyBookImbalance > 0 ? '+' : ''}${features.polyBookImbalance.toFixed(3)} | binImbal=${features.binanceBookImbalance > 0 ? '+' : ''}${features.binanceBookImbalance.toFixed(3)} | binAggr=${features.binanceAggressorRatio > 0 ? '+' : ''}${features.binanceAggressorRatio.toFixed(3)} | binMom=${features.binancePriceVelocityBps > 0 ? '+' : ''}${features.binancePriceVelocityBps.toFixed(1)}bps | ema=${(features.emaFair ?? 0).toFixed(4)} | polyMid=${(features.midYes ?? 0).toFixed(4)} | binMid=$${(lastBin?.mid ?? 0).toFixed(0)}`);
+      }
+
+      // FIX-6B: Periodic quote decision log (every ~60s)
+      if (tickCount % 120 === 60 && quote.mode !== 'blocked') {
+        const halfSpreadBps = quote.yesBid != null && quote.yesAsk != null
+          ? Math.round(((quote.yesAsk - quote.yesBid) / 2) * 10_000) : 0;
+        const pairEdgeBps = quote.yesBid != null && quote.yesAsk != null
+          ? Math.round((1 - quote.yesBid - (1 - quote.yesAsk)) * 10_000) : 0;
+        log.info(`[QUOTE] mode=${quote.mode} | fv=${quote.internalFair.toFixed(4)} | reservation=${quote.reservationPrice.toFixed(4)} | halfSpread=${halfSpreadBps}bps | bid=${quote.yesBid?.toFixed(2) ?? '-'} ask=${quote.yesAsk?.toFixed(2) ?? '-'} | bidSize=${quote.yesBidSize.toFixed(1)} askSize=${quote.yesAskSize.toFixed(1)} | invSkew=${quote.inventorySkew.toFixed(2)} | pairEdge=${pairEdgeBps}bps`);
       }
 
       // Warmup: observe feeds, build signal history, but don't place orders
@@ -690,6 +728,7 @@ async function main(): Promise<void> {
           openOrderCount: reconciler.getLast().openOrderCount,
           lastFillTs: fills.getLastFillTs(),
         },
+        recentErrors,
       });
 
       // Metrics framework: calculate, check kill thresholds, export
@@ -706,6 +745,7 @@ async function main(): Promise<void> {
       metricsHistory.push(metrics);
 
       if (killMonitor.checkMetrics(metrics)) {
+        pushError(`Kill threshold breached: ${metrics.killThresholdBreached ?? 'unknown'}`);
         log.error('[METRICS] Kill threshold breached, stopping bot');
         shutdown('KILL_THRESHOLD_BREACHED').catch((e) => log.error('shutdown error', { err: String(e) }));
         return;
@@ -735,6 +775,7 @@ async function main(): Promise<void> {
         log.info('[METRICS] Daily summary:\n' + summary);
       }
     } catch (e) {
+      pushError(`Tick error: ${String(e)}`);
       log.error('tick error', { err: String(e) });
     }
   }, cfg.tickMs);

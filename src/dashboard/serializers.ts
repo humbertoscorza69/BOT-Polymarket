@@ -117,5 +117,7 @@ export function serializeForDashboard(s: Partial<TelemetrySnapshot>): Record<str
   out.latencyStats = s.latencyStats ?? null;
   out.autohealChanges = s.autohealChanges ?? [];
   out.live = s.live ?? null;
+  out.exchangeBalance = s.exchangeBalance ?? null;
+  out.recentErrors = (s.recentErrors ?? []).slice(-20);
   return out;
 }

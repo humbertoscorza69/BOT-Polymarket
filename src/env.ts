@@ -162,6 +162,10 @@ export interface EnvConfig {
   freshnessMinOrderbookDepth: number;
 
   killPnlNetMin: number;
+  killFillRateMin: number;
+  killSpreadBpsMin: number;
+  killAdverseSelectionBpsMax: number;
+  killStaleNoQuoteRateMax: number;
 }
 
 export function loadEnv(): EnvConfig {
@@ -283,6 +287,10 @@ export function loadEnv(): EnvConfig {
     freshnessMinOrderbookDepth: num(e.FRESHNESS_MIN_ORDERBOOK_DEPTH, 3),
 
     killPnlNetMin: num(e.KILL_PNL_NET_MIN, -15),
+    killFillRateMin: num(e.KILL_FILL_RATE_MIN, 0.001),
+    killSpreadBpsMin: num(e.KILL_SPREAD_BPS_MIN, 5),
+    killAdverseSelectionBpsMax: num(e.KILL_ADVERSE_SELECTION_BPS_MAX, 500),
+    killStaleNoQuoteRateMax: num(e.KILL_STALE_NO_QUOTE_RATE_MAX, 0.80),
   };
 
   validateSanity(cfg);

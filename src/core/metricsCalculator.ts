@@ -80,12 +80,12 @@ export interface KillThresholds {
 }
 
 export const DEFAULT_KILL_THRESHOLDS: KillThresholds = {
-  spreadBpsMin: 20,
-  adverseSelectionBpsMax: 300,
-  fillRateMin: 0.02,
+  spreadBpsMin: 5,
+  adverseSelectionBpsMax: 500,
+  fillRateMin: 0.001,
   fillRateMax: 2.0,
   takerExecutionRateMax: 0.05,
-  staleNoQuoteRateMax: 0.60,
+  staleNoQuoteRateMax: 0.80,
   inventoryMismatchPctMax: 100,
   pnlNetMinUsdc: -15,
   regimeNegativePnl: true,

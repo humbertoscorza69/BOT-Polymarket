@@ -64,6 +64,8 @@ export interface TelemetrySnapshot {
     openOrderCount: number;
     lastFillTs: number | null;
   };
+  exchangeBalance: number | null;
+  recentErrors: Array<{ ts: number; msg: string }>;
 }
 
 export class TelemetryHub extends EventEmitter {

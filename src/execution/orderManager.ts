@@ -40,6 +40,8 @@ export class OrderManager extends EventEmitter {
   private market: PolymarketMarket | null = null;
   private cancelling = false;
   private lastSellBlockLogTs = 0;
+  private postOnlyBlocks = 0;
+  private postOnlyBlockWindowStart = Date.now();
 
   constructor(private readonly opts: OrderManagerOpts) {
     super();
@@ -89,6 +91,15 @@ export class OrderManager extends EventEmitter {
 
   getReplaceCount(): number {
     return this.replaceCount;
+  }
+
+  /** Returns post-only blocks per minute since last call, then resets window. */
+  getPostOnlyBlocksPerMin(): number {
+    const elapsed = (Date.now() - this.postOnlyBlockWindowStart) / 60_000;
+    const rate = elapsed > 0 ? this.postOnlyBlocks / elapsed : 0;
+    this.postOnlyBlocks = 0;
+    this.postOnlyBlockWindowStart = Date.now();
+    return Math.round(rate * 10) / 10;
   }
 
   /** Remove an order from the active map (e.g., after live fill detection). */
@@ -309,12 +320,18 @@ export class OrderManager extends EventEmitter {
       const snap = this.opts.getPolySnapshot();
       if (snap) {
         const book = w.token === 'YES' ? snap.yesBook : snap.noBook;
+        const mid = book.bids.length > 0 && book.asks.length > 0
+          ? (book.bids[0].price + book.asks[0].price) / 2 : undefined;
         if (w.side === 'BUY' && book.asks.length > 0 && w.price >= book.asks[0].price) {
-          log.warn('[POST-ONLY] buy would cross ask — skipping', { buyPrice: w.price, bestAsk: book.asks[0].price, token: w.token });
+          this.postOnlyBlocks++;
+          const gap = w.price - book.asks[0].price;
+          log.warn(`[POST-ONLY] blocked BUY ${w.token} @ ${w.price.toFixed(4)} — would cross ask @ ${book.asks[0].price.toFixed(4)} (gap=${(gap * 100).toFixed(1)}c, mid=${mid?.toFixed(4) ?? '?'})`);
           return;
         }
         if (w.side === 'SELL' && book.bids.length > 0 && w.price <= book.bids[0].price) {
-          log.warn('[POST-ONLY] sell would cross bid — skipping', { sellPrice: w.price, bestBid: book.bids[0].price, token: w.token });
+          this.postOnlyBlocks++;
+          const gap = book.bids[0].price - w.price;
+          log.warn(`[POST-ONLY] blocked SELL ${w.token} @ ${w.price.toFixed(4)} — would cross bid @ ${book.bids[0].price.toFixed(4)} (gap=${(gap * 100).toFixed(1)}c, mid=${mid?.toFixed(4) ?? '?'})`);
           return;
         }
       }
