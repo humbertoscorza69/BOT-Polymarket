@@ -43,6 +43,8 @@ export class LiveFillDetector extends EventEmitter {
   private pollCount = 0;
   private fillsDetected = 0;
   private lastPollTs = 0; // CHECK-9: for fillDetect latency upper-bound
+  private lastTradeCheckTs = 0; // Fix 2: timestamp of last trade history check
+  private processedTradeIds = new Set<string>(); // Fix 2: avoid double-counting trades
 
   constructor(private readonly opts: LiveFillDetectorOpts) {
     super();
@@ -153,11 +155,95 @@ export class LiveFillDetector extends EventEmitter {
 
       this.lastSeenIds = exchangeIds;
       this.lastPollTs = Date.now();
+
+      // Fix 2: Supplement with CLOB trade history to catch fills between polls
+      try {
+        const trades = await this.opts.clob.fetchTradeHistory();
+        const tradeActiveOrders = this.opts.getActiveOrders();
+        const activeByExId = new Map<string, ActiveOrder>();
+        for (const o of tradeActiveOrders) {
+          if (o.exchangeOrderId) activeByExId.set(o.exchangeOrderId, o);
+        }
+
+        for (const trade of trades) {
+          const tradeId = String(trade.id ?? trade.tradeId ?? trade.trade_id ?? '');
+          if (!tradeId || this.processedTradeIds.has(tradeId)) continue;
+
+          const tradeTs = Number(trade.timestamp ?? trade.ts ?? trade.createdAt ?? 0);
+          if (tradeTs > 0 && tradeTs < this.lastTradeCheckTs) continue;
+
+          const makerOrderId = String(trade.maker_order_id ?? trade.makerOrderId ?? '');
+          const takerOrderId = String(trade.taker_order_id ?? trade.takerOrderId ?? '');
+
+          const matchedOrder = activeByExId.get(makerOrderId) || activeByExId.get(takerOrderId);
+          if (!matchedOrder) continue;
+
+          this.processedTradeIds.add(tradeId);
+          this.fillsDetected++;
+          const ctx = this.opts.getContext();
+
+          const tradeSize = Number(trade.size ?? trade.amount ?? 0);
+          const tradePrice = Number(trade.price ?? 0);
+          const fill = this.buildFillFromTrade(matchedOrder, tradeSize, tradePrice, ctx);
+
+          log.info('[FILL-DETECT] trade-history fill detected', {
+            tradeId,
+            orderId: matchedOrder.quoteId,
+            exchangeOrderId: matchedOrder.exchangeOrderId,
+            side: matchedOrder.side,
+            price: tradePrice.toFixed(4),
+            size: tradeSize.toFixed(2),
+            source: 'trade_history',
+            totalDetected: this.fillsDetected,
+          });
+          this.emit('fill', fill, matchedOrder);
+        }
+        this.lastTradeCheckTs = Date.now();
+
+        // Prune processed trade IDs to avoid unbounded growth
+        if (this.processedTradeIds.size > 500) {
+          const arr = [...this.processedTradeIds];
+          this.processedTradeIds = new Set(arr.slice(-200));
+        }
+      } catch (e) {
+        log.warn('[FILL-DETECT] trade history check failed (non-fatal)', { err: String(e) });
+      }
     } catch (e) {
       log.warn('[FILL-DETECT] poll error (non-fatal)', { err: String(e) });
     } finally {
       this.polling = false;
     }
+  }
+
+  private buildFillFromTrade(
+    order: ActiveOrder,
+    tradeSize: number,
+    tradePrice: number,
+    ctx: { conditionId: string; asset: string; interval: string; regime: Regime; fair: number; mid: number; runId: string } | null,
+  ): Fill {
+    const size = tradeSize > 0 ? tradeSize : order.sizeShares - order.filledSize;
+    const price = tradePrice > 0 ? tradePrice : order.price;
+    return {
+      id: newFillId(),
+      ts: Date.now(),
+      orderId: order.quoteId,
+      conditionId: ctx?.conditionId ?? '',
+      asset: ctx?.asset ?? '',
+      interval: ctx?.interval ?? '',
+      token: order.token,
+      side: order.side,
+      price,
+      size,
+      notional: price * size,
+      feeUsdc: 0,
+      regime: ctx?.regime ?? 'medium_vol',
+      fairAtFill: ctx?.fair ?? price,
+      midAtFill: ctx?.mid ?? price,
+      isMaker: true,
+      latencyMs: 0,
+      mode: 'live' as Mode,
+      runId: ctx?.runId ?? '',
+    };
   }
 
   private buildFill(
