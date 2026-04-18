@@ -297,6 +297,9 @@ async function main(): Promise<void> {
     binanceFeed.on('snapshot', onBin);
   }
 
+  // Hoist lastFlattenTs before rotation callback to avoid TDZ
+  let lastFlattenTs = 0; // POL-35 VERIFY-7: rate-limit flatten attempts
+
   // Discovery wires markets into everything that needs them
   discovery.on('rotation', ({ market }: { market: PolymarketMarket }) => {
     log.info('rotating market', { slug: market.slug });
@@ -440,7 +443,6 @@ async function main(): Promise<void> {
   let lastExpiryTs = 0; // tracks the expiry of the last cycle we saw
   let lastQuoteRefreshTs = 0; // 2B: timestamp of last quote refresh
   let binMidAtLastRefresh = 0; // 2A: Binance mid at last quote refresh
-  let lastFlattenTs = 0; // POL-35 VERIFY-7: rate-limit flatten attempts
   let completedCycles5m = 0;
   let completedCycles15m = 0;
 

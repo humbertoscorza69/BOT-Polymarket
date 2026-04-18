@@ -204,10 +204,9 @@ export class ClobDriver {
           price: inp.price,
           side: inp.side === 'BUY' ? (clobLib?.Side?.BUY ?? 'BUY') : (clobLib?.Side?.SELL ?? 'SELL'),
           size: inp.size,
-          // Polymarket maker fee is 0. The SDK's _resolveFeeRateBps fetches the market's actual
-          // rate and throws if our value mismatches on non-zero markets. 0 is the correct value;
-          // any non-zero here would break the moment Polymarket introduces fees. (POL-35 VERIFY-5)
-          feeRateBps: 0,
+          // Polymarket requires the market's fee rate to be passed explicitly.
+          // Binary markets use feeRateBps=1000 (SDK validates against on-chain config).
+          feeRateBps: 1000,
         };
         const built = await this.client.createOrder(order);
         const orderType = clobLib?.OrderType?.GTC ?? 'GTC';
