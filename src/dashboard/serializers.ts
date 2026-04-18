@@ -114,6 +114,7 @@ export function serializeForDashboard(s: Partial<TelemetrySnapshot>): Record<str
   out.advStats = s.advStats ?? null;
   out.feedHealth = s.feedHealth ?? null;
   out.latencyArb = s.latencyArb ?? null;
+  out.latencyStats = s.latencyStats ?? null;
   out.autohealChanges = s.autohealChanges ?? [];
   out.live = s.live ?? null;
   return out;

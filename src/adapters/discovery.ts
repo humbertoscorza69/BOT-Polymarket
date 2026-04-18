@@ -310,6 +310,15 @@ export class DiscoveryEngine extends EventEmitter {
         tags.push(parts[2]); // interval
       }
 
+      // POL-35 VERIFY-3: derive window start from slug's unix timestamp suffix.
+      // If eventStartTime is present on the API response, prefer that. Fallback
+      // to the slug timestamp (which IS the window start by construction).
+      let windowStartTs = eventStartTs;
+      if (windowStartTs <= 0 && parts.length >= 4) {
+        const slugTs = parseInt(parts[3], 10);
+        if (Number.isFinite(slugTs) && slugTs > 0) windowStartTs = slugTs;
+      }
+
       const market: PolymarketMarket = {
         conditionId,
         questionId: m.questionID ? String(m.questionID) : undefined,
@@ -321,6 +330,7 @@ export class DiscoveryEngine extends EventEmitter {
         yesTokenId: upTokenId,
         noTokenId: downTokenId,
         endDateTs: eventStartTs > 0 ? eventStartTs + extractIntervalSecs(slug) : endDateTs,
+        windowStartTs: windowStartTs > 0 ? windowStartTs : undefined,
         active: Boolean(m.active ?? true),
         closed: Boolean(m.closed ?? false),
         liquidityNum: typeof m.liquidityNum === 'number' ? m.liquidityNum : Number(m.liquidity ?? 0) || undefined,
@@ -357,6 +367,7 @@ export class DiscoveryEngine extends EventEmitter {
       closed: 0,
       notAccepting: 0,
       expired: 0,
+      futureWindow: 0,
       tooShortTtl: 0,
       tooLongTtr: 0,
       badSlug: 0,
@@ -378,6 +389,14 @@ export class DiscoveryEngine extends EventEmitter {
       const ttl = m.endDateTs - now;
       if (ttl <= 0) {
         rejects.expired += 1;
+        continue;
+      }
+
+      // POL-35 VERIFY-3: reject markets whose window hasn't started yet.
+      // Exchange data proved the bot traded on future windows (e.g., bought
+      // on "1:30-1:45" market at 1:17 — 13 minutes before window open).
+      if (m.windowStartTs !== undefined && m.windowStartTs > now) {
+        rejects.futureWindow += 1;
         continue;
       }
 

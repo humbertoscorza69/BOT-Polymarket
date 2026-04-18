@@ -24,6 +24,9 @@ export interface QuoteEngineInputs {
 }
 
 export class QuoteEngine {
+  /** POL-35-I CHECK-9: optional sink for fair-value computation latency. */
+  public onFvLatency: ((ms: number) => void) | null = null;
+
   constructor(
     private readonly cfg: BotConfig,
     private readonly fair: FairValueModel,
@@ -59,8 +62,14 @@ export class QuoteEngine {
     if (preemptiveCancelActive) {
       return blocked('preemptive_cancel_active');
     }
+    // CHECK-13: Trending regime — block ACCUMULATION only, not REDUCTION.
+    // When flat, stay out entirely (don't enter into a trend). When holding
+    // inventory, we MUST be able to sell — trapping inventory in a trend is
+    // strictly worse than exiting with a small loss.
     if (regime.current === 'high_vol_trend') {
-      return blocked('trending_regime');
+      const trending = this.trendingQuote(features, inventory, params);
+      if (trending) return trending;
+      return blocked('trending_regime_flat');
     }
     if (health.state === 'UNSAFE') {
       return blocked(`health:${health.state}`);
@@ -78,7 +87,9 @@ export class QuoteEngine {
       return blocked('empty_book');
     }
 
+    const fvT0 = Date.now();
     const fairYes = this.fair.compute(features);
+    if (this.onFvLatency) this.onFvLatency(Date.now() - fvT0);
     const fairEnriched: FeatureSnapshot = { ...features, fairYes };
 
     // inventory skew in -1..1
@@ -216,5 +227,97 @@ export class QuoteEngine {
 
   private adverseSpreadAdd(toxic: number): number {
     return clamp(toxic * 60, 0, 80);
+  }
+
+  /**
+   * CHECK-13: When regime=trending AND we hold inventory, emit a one-sided
+   * reducing quote. Returns null when flat (caller will block entry).
+   * Strategy:
+   *   - hold YES only → SELL YES (ask side, stays maker at reservation+spread)
+   *   - hold NO only → SELL NO directly (noAsk populated)
+   *   - hold both → reduce the larger side
+   * Uses half the normal size (sizingMultiplier=0.5) since trends are toxic
+   * and we want smaller, more frequent exits rather than one big one.
+   */
+  private trendingQuote(
+    features: FeatureSnapshot,
+    inventory: InventoryState,
+    params: AdaptiveParams,
+  ): QuoteResult | null {
+    const FLAT_SHARE_THRESHOLD = 0.5;
+    const hasYes = inventory.yesPosition > FLAT_SHARE_THRESHOLD;
+    const hasNo = inventory.noPosition > FLAT_SHARE_THRESHOLD;
+    if (!hasYes && !hasNo) return null; // flat → caller returns blocked
+
+    const fvT0 = Date.now();
+    const fairYes = this.fair.compute(features);
+    if (this.onFvLatency) this.onFvLatency(Date.now() - fvT0);
+
+    const invSkew = inventory.normalizedSkew;
+    const sigma = Math.max(this.cfg.avSigmaFloor, features.realizedVolEma / 10_000);
+    const av = this.avellaneda.compute({
+      fair: fairYes,
+      sigma,
+      gamma: params.gamma,
+      k: params.k,
+      inventorySkew: invSkew,
+      timeToExpirySec: features.timeToExpirySec,
+    });
+
+    const baseHalfSpreadProb = this.cfg.quoteBaseHalfSpreadBps / 10_000;
+    const minEdgeProb = this.cfg.avMinEdgeBps / 10_000;
+    const halfSpread = Math.max(minEdgeProb, baseHalfSpreadProb, av.halfSpread);
+
+    const sizeMul = 0.5; // trends are toxic — reduce via smaller slices
+    const baseSize = this.cfg.defaultQuoteSizeUsdc;
+    const notional = baseSize * sizeMul;
+
+    const reduceYes = hasYes && (!hasNo || inventory.yesPosition >= inventory.noPosition);
+
+    const baseResult = {
+      yesBid: null as number | null,
+      yesAsk: null as number | null,
+      yesBidSize: 0,
+      yesAskSize: 0,
+      noBid: null as number | null,
+      noAsk: null as number | null,
+      noBidSize: 0,
+      noAskSize: 0,
+      mode: 'one_sided_ask' as const,
+      blockedReason: null as string | null,
+      inventorySkew: invSkew,
+      internalFair: fairYes,
+      cautionScore: 1, // high caution during trends
+      reservationPrice: av.reservationPrice,
+      optimalSpread: av.optimalSpread,
+      sizingMultiplier: sizeMul,
+    };
+
+    if (reduceYes) {
+      let yesAsk = clampProb(av.reservationPrice + halfSpread);
+      if (features.bestBidYes !== null && yesAsk <= features.bestBidYes + 0.001) {
+        yesAsk = features.bestBidYes + 0.001;
+      }
+      const wantShares = notional / Math.max(0.02, yesAsk);
+      const capped = Math.min(inventory.yesPosition, wantShares);
+      const minShares = this.cfg.minOrderSizeUsdc / yesAsk;
+      if (capped < minShares) return null; // not enough to meet min → block
+      const yAskSize = clampSize(capped, minShares, this.cfg.maxOrderSizeUsdc / yesAsk);
+      return { ...baseResult, yesAsk, yesAskSize: yAskSize };
+    }
+
+    // reduce NO: SELL NO at (1 - reservation) + half_spread
+    let noAsk = clampProb(1 - av.reservationPrice + halfSpread);
+    // noBid best = 1 - yesAsk. Don't cross it.
+    const noBestBid = features.bestAskYes !== null ? 1 - features.bestAskYes : null;
+    if (noBestBid !== null && noAsk <= noBestBid + 0.001) {
+      noAsk = noBestBid + 0.001;
+    }
+    const wantShares = notional / Math.max(0.02, noAsk);
+    const capped = Math.min(inventory.noPosition, wantShares);
+    const minShares = this.cfg.minOrderSizeUsdc / noAsk;
+    if (capped < minShares) return null;
+    const nAskSize = clampSize(capped, minShares, this.cfg.maxOrderSizeUsdc / noAsk);
+    return { ...baseResult, noAsk, noAskSize: nAskSize };
   }
 }

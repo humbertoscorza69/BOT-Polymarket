@@ -51,6 +51,8 @@ export class ClobDriver {
   private bucket: TokenBucket;
   private circuitOpen = false;
   private circuitUntil = 0;
+  /** POL-35-I: optional sink for latency observations. */
+  public onLatency: ((stage: 'orderPlace' | 'cancel', ms: number) => void) | null = null;
 
   constructor(private readonly cfg: BotConfig) {
     this.bucket = new TokenBucket(cfg.rateLimitBurst, cfg.rateLimitOrdersPerSec);
@@ -193,37 +195,50 @@ export class ClobDriver {
 
   async placeOrder(inp: OrderInput): Promise<OrderResult> {
     await this.bucket.take(1);
-    return this.guarded(async () => {
-      if (!this.client) throw new ExecutionError('client not initialized');
-      const order = {
-        tokenID: inp.tokenId,
-        price: inp.price,
-        side: inp.side === 'BUY' ? (clobLib?.Side?.BUY ?? 'BUY') : (clobLib?.Side?.SELL ?? 'SELL'),
-        size: inp.size,
-        feeRateBps: 1000,
-      };
-      const built = await this.client.createOrder(order);
-      const orderType = clobLib?.OrderType?.GTC ?? 'GTC';
-      const r = await this.client.postOrder(built, orderType);
-      if (inp.postOnly) {
-        log.debug('post-only enforced client-side (no native POTO order type in CLOB SDK); spread-cross guard in QuoteEngine prevents taking');
-      }
-      const orderId = String(r?.orderID ?? r?.orderId ?? r?.id ?? '');
-      const success = Boolean(r?.success ?? orderId);
-      return { orderId, success, raw: r, errorMsg: success ? undefined : String(r?.errorMsg ?? r?.error ?? 'unknown') };
-    });
+    const t0 = Date.now();
+    try {
+      return await this.guarded(async () => {
+        if (!this.client) throw new ExecutionError('client not initialized');
+        const order = {
+          tokenID: inp.tokenId,
+          price: inp.price,
+          side: inp.side === 'BUY' ? (clobLib?.Side?.BUY ?? 'BUY') : (clobLib?.Side?.SELL ?? 'SELL'),
+          size: inp.size,
+          // Polymarket maker fee is 0. The SDK's _resolveFeeRateBps fetches the market's actual
+          // rate and throws if our value mismatches on non-zero markets. 0 is the correct value;
+          // any non-zero here would break the moment Polymarket introduces fees. (POL-35 VERIFY-5)
+          feeRateBps: 0,
+        };
+        const built = await this.client.createOrder(order);
+        const orderType = clobLib?.OrderType?.GTC ?? 'GTC';
+        const r = await this.client.postOrder(built, orderType);
+        if (inp.postOnly) {
+          log.debug('post-only enforced client-side (no native POTO order type in CLOB SDK); spread-cross guard in QuoteEngine prevents taking');
+        }
+        const orderId = String(r?.orderID ?? r?.orderId ?? r?.id ?? '');
+        const success = Boolean(r?.success ?? orderId);
+        return { orderId, success, raw: r, errorMsg: success ? undefined : String(r?.errorMsg ?? r?.error ?? 'unknown') };
+      });
+    } finally {
+      if (this.onLatency) this.onLatency('orderPlace', Date.now() - t0);
+    }
   }
 
   async cancelOrder(orderId: string): Promise<boolean> {
     await this.bucket.take(1);
-    return this.guarded(async () => {
-      if (!this.client) throw new ExecutionError('client not initialized');
-      if (typeof this.client.cancelOrder === 'function') {
-        const r = await this.client.cancelOrder({ orderID: orderId });
-        return Boolean(r);
-      }
-      return false;
-    });
+    const t0 = Date.now();
+    try {
+      return await this.guarded(async () => {
+        if (!this.client) throw new ExecutionError('client not initialized');
+        if (typeof this.client.cancelOrder === 'function') {
+          const r = await this.client.cancelOrder({ orderID: orderId });
+          return Boolean(r);
+        }
+        return false;
+      });
+    } finally {
+      if (this.onLatency) this.onLatency('cancel', Date.now() - t0);
+    }
   }
 
   async cancelAll(): Promise<number> {

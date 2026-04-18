@@ -114,7 +114,7 @@ describe('FIX 1: Ask sizing formula', () => {
 // FIX 2: SELL-side inventory gate
 // ============================================================
 describe('FIX 2: SELL-side inventory gate', () => {
-  it('blocks SELL when position=0 YES', async () => {
+  it('converts SELL YES to BUY NO when position=0 (POL-39 Fix B / POL-35 VERIFY-2)', async () => {
     const cfg = mkCfg();
     const paper = new PaperTrader(cfg);
     const inv = new InventoryEngine(cfg);
@@ -127,8 +127,12 @@ describe('FIX 2: SELL-side inventory gate', () => {
       yesAsk: 0.55, yesAskSize: 2,
       mode: 'one_sided_ask',
     }));
-    // SELL should have been blocked — no active orders
-    expect(om.getActive().length).toBe(0);
+    // SELL YES @ 0.55 should be CONVERTED to BUY NO @ 0.45 (synthetic sell).
+    const active = om.getActive();
+    expect(active.length).toBe(1);
+    expect(active[0].side).toBe('BUY');
+    expect(active[0].token).toBe('NO');
+    expect(active[0].price).toBeCloseTo(0.45, 2);
   });
 
   it('allows SELL when position > 0', async () => {

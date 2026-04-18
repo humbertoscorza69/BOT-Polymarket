@@ -22,6 +22,10 @@ export interface OrderManagerOpts {
   clob?: ClobDriver;
   inventory?: InventoryEngine;
   getPolySnapshot?: () => import('../types').PolySnapshot | null;
+  /** Invoked with exchangeOrderId BEFORE the cancel API request is sent,
+   *  so the fill detector doesn't mis-classify a cancel as a fill
+   *  between the API call and the 'cancelled' event emission. */
+  onBeforeCancel?: (exchangeOrderId: string) => void;
 }
 
 /**
@@ -92,6 +96,36 @@ export class OrderManager extends EventEmitter {
     this.active.delete(quoteId);
   }
 
+  /**
+   * POL-35-K tick rounding. Exposed so pair-edge validation can use the
+   * POST-round prices (what actually reaches the exchange), not the raw
+   * computed prices. Direction:
+   *   - Maker BUY: floor (stays below ask → remains maker)
+   *   - Maker SELL: ceil (stays above bid → remains maker)
+   *   - Taker/flatten: nearest (accept either direction)
+   * Then clamps to [tick, 1-tick] and snaps to 4 decimals for float safety.
+   */
+  private roundToTick(price: number, side: 'BUY' | 'SELL', taker: boolean): number {
+    const tick = this.opts.cfg.tickSize;
+    // Guard explicitly for undefined/NaN — `NaN <= 0` is false so a naive
+    // `tick <= 0` check falls through and the arithmetic below produces NaN.
+    if (!Number.isFinite(tick) || tick <= 0) return price;
+    // Integer-tick math with epsilon. Division like `0.46 / 0.01` yields
+    // 45.99999... in IEEE 754, so `Math.floor` would drop a full tick down
+    // to 0.45. Multiplying by an integer tick count (100 for tick=0.01) plus
+    // a tiny epsilon snaps near-integer artifacts onto the right cell.
+    const ticksPerUnit = Math.round(1 / tick);
+    const scaled = price * ticksPerUnit;
+    const EPS = 1e-9;
+    let tickIdx: number;
+    if (taker) tickIdx = Math.round(scaled);
+    else if (side === 'BUY') tickIdx = Math.floor(scaled + EPS);
+    else tickIdx = Math.ceil(scaled - EPS);
+    let rounded = tickIdx / ticksPerUnit;
+    rounded = Math.max(tick, Math.min(1 - tick, rounded));
+    return Math.round(rounded * 10_000) / 10_000;
+  }
+
   async applyQuote(q: QuoteResult): Promise<void> {
     if (this.cancelling) return;
     if (!this.market) return;
@@ -112,6 +146,59 @@ export class OrderManager extends EventEmitter {
     }
     if (q.noAsk !== null && q.noAskSize > 0) {
       want.push({ side: 'SELL', token: 'NO', price: q.noAsk, sizeShares: q.noAskSize, tokenId: this.market.noTokenId });
+    }
+
+    // POL-35-L + CHECK-3: Pair-edge validation using POST-ROUND prices.
+    // We simulate the tick-rounding that place() will apply (including the
+    // SELL→BUY-NO conversion path) so the check validates what actually
+    // reaches the exchange — not the pre-round computed values. Without
+    // post-round validation, a pair that passes at 210 bps could hit the
+    // exchange at 110 bps after both sides round inward by half a tick.
+    const inv = this.opts.inventory?.state;
+    const buyYesRaw = want.find((w) => w.side === 'BUY' && w.token === 'YES')?.price;
+    const buyYesRounded = buyYesRaw !== undefined ? this.roundToTick(buyYesRaw, 'BUY', false) : undefined;
+
+    const directBuyNoRaw = want.find((w) => w.side === 'BUY' && w.token === 'NO')?.price;
+    const directBuyNoRounded = directBuyNoRaw !== undefined ? this.roundToTick(directBuyNoRaw, 'BUY', false) : undefined;
+
+    // SELL YES converts to BUY NO at (1 - sellPrice) when yesPosition <= 0.
+    // The converted price is then floor-rounded as a BUY.
+    const sellYesForConversion = want.find((w) => w.side === 'SELL' && w.token === 'YES');
+    const willConvert = sellYesForConversion && (!inv || inv.yesPosition <= 0);
+    const convertedBuyNoRounded = willConvert
+      ? this.roundToTick(1 - sellYesForConversion.price, 'BUY', false)
+      : undefined;
+
+    const effectiveBuyNo = directBuyNoRounded ?? convertedBuyNoRounded;
+
+    if (buyYesRounded !== undefined && effectiveBuyNo !== undefined) {
+      const pairSum = buyYesRounded + effectiveBuyNo;
+      const pairEdgeBps = (1 - pairSum) * 10_000;
+      const minEdgeBps = this.opts.cfg.minPairEdgeBps;
+      if (pairEdgeBps < minEdgeBps) {
+        log.error('[PAIR-CHECK] post-round edge insufficient — skipping paired BUY YES + BUY NO', {
+          yesBuy: buyYesRounded.toFixed(4),
+          noBuy: effectiveBuyNo.toFixed(4),
+          pairSum: pairSum.toFixed(4),
+          edgeBps: pairEdgeBps.toFixed(0),
+          minBps: minEdgeBps,
+        });
+        // Cancel any existing orders on either BUY side so we don't get stuck
+        // with stale quotes at the bad pair prices. SELL YES conversion also
+        // dropped. Existing SELL YES (when inv>0, no conversion) keeps.
+        for (const o of this.active.values()) {
+          const isBuyPair = o.side === 'BUY' && (o.token === 'YES' || o.token === 'NO');
+          const isConvertingSellYes = o.side === 'SELL' && o.token === 'YES' && (!inv || inv.yesPosition <= 0);
+          if (isBuyPair || isConvertingSellYes) {
+            await this.cancel(o.quoteId, 'pair_edge_insufficient');
+          }
+        }
+        return;
+      }
+      log.debug('[PAIR-CHECK] post-round edge ok', {
+        pairSum: pairSum.toFixed(4),
+        edgeBps: pairEdgeBps.toFixed(0),
+      });
     }
 
     // match existing orders by (token, side); either keep, replace, or cancel
@@ -150,9 +237,24 @@ export class OrderManager extends EventEmitter {
     price: number;
     sizeShares: number;
     tokenId: string;
+    bypassPostOnly?: boolean;
+    bypassInventoryCap?: boolean;
+    bypassSellConversion?: boolean;
   }): Promise<void> {
+    // POL-35 VERIFY-3: safety net — refuse orders on markets whose window
+    // hasn't started yet. Primary filter is in discovery, this catches any
+    // edge case where a future-window market sneaks through.
+    if (this.market?.windowStartTs !== undefined && this.market.windowStartTs * 1000 > Date.now()) {
+      const waitSec = this.market.windowStartTs - Math.floor(Date.now() / 1000);
+      log.error('[ORDER-BLOCKED] refusing order on future market', {
+        slug: this.market.slug,
+        windowStartsInSec: waitSec,
+      });
+      return;
+    }
+
     // B1: Pre-trade inventory cap check (USDC notional + per-side share cap)
-    if (this.opts.inventory && w.side === 'BUY') {
+    if (this.opts.inventory && w.side === 'BUY' && !w.bypassInventoryCap) {
       const sizeUsdc = w.price * w.sizeShares;
       if (!this.opts.inventory.canAccumulate(w.token, sizeUsdc, w.sizeShares)) {
         log.warn('[INVENTORY] blocked order — would exceed cap', { side: w.side, token: w.token, sizeUsdc: sizeUsdc.toFixed(2), sizeShares: w.sizeShares });
@@ -162,7 +264,7 @@ export class OrderManager extends EventEmitter {
 
     // SELL gate: convert SELL to BUY-opposite when no position (synthetic sell),
     // or clamp SELL size to current position.
-    if (this.opts.inventory && w.side === 'SELL') {
+    if (this.opts.inventory && w.side === 'SELL' && !w.bypassSellConversion) {
       const pos = w.token === 'YES'
         ? this.opts.inventory.state.yesPosition
         : this.opts.inventory.state.noPosition;
@@ -195,8 +297,15 @@ export class OrderManager extends EventEmitter {
       }
     }
 
-    // H3: Post-only guard — prevent crossing the book
-    if (this.opts.getPolySnapshot) {
+    // POL-35-K: Tick-size rounding. Polymarket binary markets tick at $0.01
+    // by default. Rounds via the shared roundToTick helper so applyQuote's
+    // pair check and this place() produce identical post-round prices.
+    // Idempotent — rounding an already-rounded value is a no-op.
+    w.price = this.roundToTick(w.price, w.side, Boolean(w.bypassPostOnly));
+
+    // H3: Post-only guard — prevent crossing the book (bypassed on flatten
+    // since flatten's whole purpose is to aggressively exit).
+    if (this.opts.getPolySnapshot && !w.bypassPostOnly) {
       const snap = this.opts.getPolySnapshot();
       if (snap) {
         const book = w.token === 'YES' ? snap.yesBook : snap.noBook;
@@ -265,7 +374,13 @@ export class OrderManager extends EventEmitter {
       if (this.opts.mode === 'paper' || this.opts.mode === 'dry_run') {
         if (this.opts.paper) this.opts.paper.cancel(quoteId);
       } else if (this.opts.mode === 'live') {
-        if (this.opts.clob && o.exchangeOrderId) await this.opts.clob.cancelOrder(o.exchangeOrderId);
+        // POL-35 VERIFY-1: mark cancelling BEFORE the API call to close the
+        // race window where the fill detector poll could see the order
+        // removed and mis-identify it as a fill.
+        if (this.opts.clob && o.exchangeOrderId) {
+          if (this.opts.onBeforeCancel) this.opts.onBeforeCancel(o.exchangeOrderId);
+          await this.opts.clob.cancelOrder(o.exchangeOrderId);
+        }
       }
       this.active.delete(quoteId);
       this.emit('cancelled', o, reason);
@@ -295,5 +410,65 @@ export class OrderManager extends EventEmitter {
     } finally {
       this.cancelling = false;
     }
+  }
+
+  /**
+   * POL-35 VERIFY-7: aggressive pre-expiry flatten.
+   * Stage controls price aggression:
+   *   defensive  — sell YES at best-ask / NO at best-ask (passive, stay maker)
+   *   aggressive — sell YES at best-bid / NO at best-bid (cross spread = taker)
+   *   emergency  — sell at $0.01 (fire sale, any price above zero)
+   * Bypasses post-only, inventory-cap, and SELL→BUY-opposite conversion.
+   * Caller should rate-limit invocations; we place at most one order per
+   * non-zero position per call.
+   */
+  async flatten(stage: 'defensive' | 'aggressive' | 'emergency'): Promise<number> {
+    if (!this.market || !this.opts.inventory) return 0;
+    const inv = this.opts.inventory.state;
+    const snap = this.opts.getPolySnapshot?.() ?? null;
+
+    const pickPrice = (token: 'YES' | 'NO'): number => {
+      if (stage === 'emergency') return 0.01;
+      const book = snap ? (token === 'YES' ? snap.yesBook : snap.noBook) : null;
+      if (stage === 'aggressive') {
+        // Cross the spread: sell at BID price (taker).
+        return book?.bids[0]?.price ?? 0.01;
+      }
+      // Defensive: stay passive at ASK price (maker, hope for fill).
+      return book?.asks[0]?.price ?? 0.99;
+    };
+
+    let placed = 0;
+    if (inv.yesPosition > 0) {
+      const price = pickPrice('YES');
+      log.warn('[FLATTEN]', { stage, token: 'YES', price: price.toFixed(4), shares: inv.yesPosition.toFixed(2) });
+      await this.place({
+        side: 'SELL',
+        token: 'YES',
+        price,
+        sizeShares: inv.yesPosition,
+        tokenId: this.market.yesTokenId,
+        bypassPostOnly: stage !== 'defensive',
+        bypassInventoryCap: true,
+        bypassSellConversion: true,
+      });
+      placed += 1;
+    }
+    if (inv.noPosition > 0) {
+      const price = pickPrice('NO');
+      log.warn('[FLATTEN]', { stage, token: 'NO', price: price.toFixed(4), shares: inv.noPosition.toFixed(2) });
+      await this.place({
+        side: 'SELL',
+        token: 'NO',
+        price,
+        sizeShares: inv.noPosition,
+        tokenId: this.market.noTokenId,
+        bypassPostOnly: stage !== 'defensive',
+        bypassInventoryCap: true,
+        bypassSellConversion: true,
+      });
+      placed += 1;
+    }
+    return placed;
   }
 }
